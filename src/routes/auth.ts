@@ -162,12 +162,13 @@ router.get('/smartsheet/callback', async (req: Request, res: Response) => {
   }
 
   try {
-    const { tokens } = await smartsheetAuthService.exchangeCodeForTokens(code, state);
-    
+    // Get OAuth state before it gets deleted by exchangeCodeForTokens
     const oauthState = await database.getOAuthState(state);
     if (!oauthState?.userId) {
       throw new Error('No user associated with this OAuth state');
     }
+
+    const { tokens } = await smartsheetAuthService.exchangeCodeForTokens(code, state);
 
     await database.updateUserTokens(oauthState.userId, 'smartsheet', tokens);
 

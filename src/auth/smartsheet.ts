@@ -63,14 +63,16 @@ export class SmartsheetAuthService {
     await database.deleteOAuthState(state);
 
     try {
-      const tokenResponse = await axios.post(this.tokenUrl, {
+      const formData = new URLSearchParams({
         client_id: this.clientId,
         client_secret: this.clientSecret,
         code,
         grant_type: 'authorization_code',
         redirect_uri: this.redirectUri,
         code_verifier: oauthState.codeVerifier
-      }, {
+      });
+
+      const tokenResponse = await axios.post(this.tokenUrl, formData, {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded'
         }
@@ -111,12 +113,14 @@ export class SmartsheetAuthService {
         throw new Error('No refresh token available');
       }
 
-      const response = await axios.post(this.tokenUrl, {
+      const formData = new URLSearchParams({
         client_id: this.clientId,
         client_secret: this.clientSecret,
         refresh_token: tokens.refreshToken,
         grant_type: 'refresh_token'
-      }, {
+      });
+
+      const response = await axios.post(this.tokenUrl, formData, {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded'
         }
@@ -220,9 +224,11 @@ export class SmartsheetAuthService {
     try {
       const tokens = encryptionService.decryptTokens(encryptedTokens.encryptedData);
       
-      await axios.post(`${this.tokenUrl}/revoke`, {
+      const formData = new URLSearchParams({
         token: tokens.accessToken
-      }, {
+      });
+
+      await axios.post(`${this.tokenUrl}/revoke`, formData, {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded'
         }
