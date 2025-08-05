@@ -32,3 +32,4 @@ uploads/
 temp/
 .certificates/
 sessions/
+app.json
