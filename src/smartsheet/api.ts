@@ -180,6 +180,14 @@ export class SmartsheetAPIService {
         }))
       };
 
+      console.log('📋 Creating sheet with data:', {
+        name: sheetData.name,
+        columnCount: sheetData.columns.length,
+        columns: sheetData.columns.map(c => ({ title: c.title, type: c.type, primary: c.primary })),
+        workspaceId,
+        folderId
+      });
+
       let endpoint = '/sheets';
       if (folderId) {
         endpoint = `/folders/${folderId}/sheets`;
@@ -212,6 +220,17 @@ export class SmartsheetAPIService {
       const endpoint = folderId ? `/folders/${folderId}/sheets` : 
                      workspaceId ? `/workspaces/${workspaceId}/sheets` : '/sheets';
       this.logApiResponse(endpoint, 'POST', null, error);
+      
+      // If folder creation fails, try workspace root as fallback
+      if (folderId && error.response?.status >= 400) {
+        console.log('🔄 Folder creation failed, trying workspace root...');
+        try {
+          return await this.createSheet(encryptedTokens, name, columns, workspaceId, undefined);
+        } catch (fallbackError) {
+          console.log('❌ Workspace fallback also failed');
+        }
+      }
+      
       throw new Error(`Failed to create sheet: ${error.message}`);
     }
   }

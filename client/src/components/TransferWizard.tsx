@@ -202,6 +202,47 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
     }
   };
 
+  const sanitizeColumnTitle = (header: string, index: number, allHeaders: string[]): string => {
+    if (!header || !header.trim()) {
+      return `Column ${index + 1}`;
+    }
+
+    let sanitized = header.trim();
+    
+    // Limit length to 50 characters (Smartsheet limit)
+    if (sanitized.length > 50) {
+      sanitized = sanitized.substring(0, 47) + '...';
+    }
+    
+    // Replace problematic characters
+    sanitized = sanitized.replace(/[<>]/g, ''); // Remove < >
+    sanitized = sanitized.replace(/\s+/g, ' '); // Normalize whitespace
+    
+    if (!sanitized) {
+      return `Column ${index + 1}`;
+    }
+    
+    // Handle duplicates by adding incremental numbers
+    const headersBeforeThis = allHeaders.slice(0, index);
+    let finalTitle = sanitized;
+    let counter = 2; // Start with 2 for the first duplicate
+    
+    while (headersBeforeThis.includes(finalTitle)) {
+      finalTitle = `${sanitized} ${counter}`;
+      counter++;
+      
+      // Ensure we don't exceed length limit with the counter
+      if (finalTitle.length > 50) {
+        const suffix = ` ${counter - 1}`;
+        const baseLength = 50 - suffix.length;
+        finalTitle = `${sanitized.substring(0, baseLength)}${suffix}`;
+        break;
+      }
+    }
+    
+    return finalTitle;
+  };
+
   const executeTransfer = async () => {
     if (!selectedSpreadsheet || selectedTabs.length === 0) {
       toast.error('Missing Google Sheet selection');
@@ -230,7 +271,7 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
         // Create basic columns based on Google headers, filtering out empty titles
         const columns = googleHeaders
           .map((header, index) => ({
-            title: header && header.trim() ? header.trim() : `Column ${index + 1}`,
+            title: sanitizeColumnTitle(header, index, googleHeaders),
             type: 'TEXT_NUMBER' as const,
             primary: index === 0
           }))
