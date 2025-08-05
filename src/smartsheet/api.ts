@@ -180,13 +180,7 @@ export class SmartsheetAPIService {
         }))
       };
 
-      console.log('📋 Creating sheet with data:', {
-        name: sheetData.name,
-        columnCount: sheetData.columns.length,
-        columns: sheetData.columns.map(c => ({ title: c.title, type: c.type, primary: c.primary })),
-        workspaceId,
-        folderId
-      });
+      console.log(`📋 Creating sheet "${sheetData.name}" with ${sheetData.columns.length} columns`);
 
       let endpoint = '/sheets';
       if (folderId) {
@@ -203,6 +197,8 @@ export class SmartsheetAPIService {
       );
 
       this.logApiResponse(endpoint, 'POST', response);
+
+      console.log(`✅ Smartsheet created: ${response.result.name} (ID: ${response.result.id})`);
 
       return {
         id: response.result.id,
@@ -223,11 +219,11 @@ export class SmartsheetAPIService {
       
       // If folder creation fails, try workspace root as fallback
       if (folderId && error.response?.status >= 400) {
-        console.log('🔄 Folder creation failed, trying workspace root...');
+        console.log('🔄 Retrying in workspace root...');
         try {
           return await this.createSheet(encryptedTokens, name, columns, workspaceId, undefined);
         } catch (fallbackError) {
-          console.log('❌ Workspace fallback also failed');
+          console.log('❌ Workspace fallback failed');
         }
       }
       
@@ -352,6 +348,13 @@ export class SmartsheetAPIService {
           }
         } catch (error: any) {
           totalFailed += batch.length;
+          
+          // Enhanced error logging for 400 errors
+          console.error(`❌ Smartsheet row insertion failed:`, {
+            status: error.response?.status,
+            statusText: error.response?.statusText,
+            errorResponse: error.response?.data
+          });
           
           // Log individual row errors
           for (let j = 0; j < batch.length; j++) {

@@ -302,33 +302,17 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
         targetSheet = response.data.data!;
         setCreatedSheet(targetSheet);
         
-        // Create proper column mappings using actual Smartsheet column IDs
-        const properMappings: ColumnMapping[] = [];
-        let smartsheetColumnIndex = 0;
         
-        for (let i = 0; i < googleHeaders.length; i++) {
-          const header = googleHeaders[i];
-          
-          // Skip empty headers
-          if (!header || !header.trim()) {
-            continue;
-          }
-          
-          // Get corresponding Smartsheet column
-          const smartsheetColumn = targetSheet.columns[smartsheetColumnIndex];
-          if (smartsheetColumn) {
-            properMappings.push({
-              googleColumn: header.trim(),
-              smartsheetColumnId: smartsheetColumn.id,
-              dataType: 'text' as const
-            });
-            smartsheetColumnIndex++;
-          }
-        }
+        // Create temporary column mappings (backend will fix with real IDs)
+        const tempMappings: ColumnMapping[] = googleHeaders
+          .filter(header => header && header.trim())
+          .map((header, index) => ({
+            googleColumn: header.trim(),
+            smartsheetColumnId: index + 1, // Temporary - backend will fix
+            dataType: 'text' as const
+          }));
 
-        setColumnMappings(properMappings);
-        console.log('✓ Column mappings created:', properMappings.length, 'mappings');
-        
+        setColumnMappings(tempMappings);
         toast.success('Smartsheet created successfully');
       } else {
         if (!selectedExistingSheet) {
@@ -337,32 +321,16 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
         }
         targetSheet = selectedExistingSheet;
         
-        // Create column mappings for existing sheet
-        const existingMappings: ColumnMapping[] = [];
-        let smartsheetColumnIndex = 0;
-        
-        for (let i = 0; i < googleHeaders.length; i++) {
-          const header = googleHeaders[i];
-          
-          // Skip empty headers
-          if (!header || !header.trim()) {
-            continue;
-          }
-          
-          // Get corresponding Smartsheet column
-          const smartsheetColumn = targetSheet.columns[smartsheetColumnIndex];
-          if (smartsheetColumn) {
-            existingMappings.push({
-              googleColumn: header.trim(),
-              smartsheetColumnId: smartsheetColumn.id,
-              dataType: 'text' as const
-            });
-            smartsheetColumnIndex++;
-          }
-        }
+        // Create temporary column mappings for existing sheet (backend will fix with real IDs)
+        const tempMappings: ColumnMapping[] = googleHeaders
+          .filter(header => header && header.trim())
+          .map((header, index) => ({
+            googleColumn: header.trim(),
+            smartsheetColumnId: index + 1, // Temporary - backend will fix
+            dataType: 'text' as const
+          }));
 
-        setColumnMappings(existingMappings);
-        console.log('✓ Column mappings created for existing sheet:', existingMappings.length, 'mappings');
+        setColumnMappings(tempMappings);
       }
 
       setExecutionStep('Creating transfer job...');
@@ -372,12 +340,6 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
         throw new Error('No valid column mappings found. Please check your Google Sheet headers.');
       }
 
-      console.log('🚀 Creating transfer job:', {
-        spreadsheet: selectedSpreadsheet.title,
-        tabs: selectedTabs,
-        targetSheet: targetSheet.name,
-        mappingsCount: columnMappings.length
-      });
 
       // Create transfer job
       const jobResponse = await transferAPI.createJob({
@@ -658,14 +620,17 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
           <button
             type="button"
             onClick={() => {
-              // Create basic mappings for now
-              const mappings: ColumnMapping[] = googleHeaders.map((header, index) => ({
-                googleColumn: header,
-                smartsheetColumnId: index + 1,
-                dataType: 'text'
-              }));
+              // Create temporary mappings - these will be fixed during transfer execution
+              const mappings: ColumnMapping[] = googleHeaders
+                .filter(header => header && header.trim())
+                .map((header, index) => ({
+                  googleColumn: header.trim(),
+                  smartsheetColumnId: index + 1, // Temporary - will be fixed in executeTransfer
+                  dataType: 'text' as const
+                }));
+              
               setColumnMappings(mappings);
-              toast.success('Basic column mappings created');
+              toast.success('Basic column mappings created (will use correct IDs during transfer)');
             }}
             className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
           >

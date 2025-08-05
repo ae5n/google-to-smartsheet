@@ -48,6 +48,7 @@ export class TransferService {
   public async executeTransfer(jobId: string): Promise<void> {
     const job = await database.getTransferJobById(jobId);
     if (!job) {
+      console.error(`❌ Transfer job ${jobId} not found`);
       throw new Error('Transfer job not found');
     }
 
@@ -106,12 +107,21 @@ export class TransferService {
     googleTokens: EncryptedTokens,
     smartsheetTokens: EncryptedTokens
   ): Promise<void> {
-    // Get Google Sheets data
+    // First, get header information to determine the correct data range
+    const firstTab = job.googleSheetTabs[0];
+    const { headerRowIndex } = await googleSheetsService.getSpreadsheetHeadersWithRowIndex(
+      googleTokens,
+      job.googleSpreadsheetId,
+      firstTab
+    );
+
+    // Get Google Sheets data starting from the correct header row
     const googleData = await googleSheetsService.getSpreadsheetData(
       googleTokens,
       job.googleSpreadsheetId,
       job.googleSheetTabs,
-      true
+      true,
+      headerRowIndex
     );
 
     let totalRows = 0;
@@ -172,13 +182,41 @@ export class TransferService {
     googleTokens: EncryptedTokens,
     smartsheetTokens: EncryptedTokens
   ): Promise<void> {
-    // Get Google Sheets data
+    // First, get header information to determine the correct data range
+    const firstTab = job.googleSheetTabs[0];
+    const { headerRowIndex } = await googleSheetsService.getSpreadsheetHeadersWithRowIndex(
+      googleTokens,
+      job.googleSpreadsheetId,
+      firstTab
+    );
+
+    console.log(`📊 Starting transfer - Header row: ${headerRowIndex + 1}, Target sheet: ${job.smartsheetId}`);
+
+    // Get Google Sheets data starting from the correct header row
     const googleData = await googleSheetsService.getSpreadsheetData(
       googleTokens,
       job.googleSpreadsheetId,
       job.googleSheetTabs,
-      true
+      true,
+      headerRowIndex
     );
+
+    // Fix column mappings by getting the actual sheet structure
+    const actualSheet = await smartsheetAPIService.getSheetDetails(smartsheetTokens, job.smartsheetId);
+    
+    const fixedColumnMappings = job.columnMappings.map((mapping, index) => {
+      const actualColumn = actualSheet.columns[index];
+      if (actualColumn) {
+        return {
+          ...mapping,
+          smartsheetColumnId: actualColumn.id
+        };
+      }
+      return mapping;
+    });
+
+    // Use the fixed mappings for the rest of the transfer
+    job.columnMappings = fixedColumnMappings;
 
     const errors: TransferError[] = [];
     let totalRows = 0;
@@ -208,9 +246,12 @@ export class TransferService {
 
     // Process each tab
     for (const [tabName, tabData] of Object.entries(googleData)) {
-      if (tabData.length <= 1) continue; // Skip if no data rows
+      if (tabData.length <= 1) {
+        continue; // Skip if no data rows
+      }
 
       const dataRows = tabData.slice(1); // Skip header row
+      console.log(`📋 Processing ${tabName}: ${dataRows.length} rows`);
 
       // Process rows in batches
       const batchSize = 50;
@@ -226,6 +267,7 @@ export class TransferService {
               googleTokens,
               smartsheetTokens
             );
+
 
             smartsheetRows.push({ cells: smartsheetCells });
 
@@ -255,6 +297,11 @@ export class TransferService {
             );
 
             processedRows += result.success;
+            
+            const batchNum = Math.floor(i / batchSize) + 1;
+            const totalBatches = Math.ceil(dataRows.length / batchSize);
+            const progressPercent = Math.round((processedRows / totalRows) * 100);
+            console.log(`✅ Batch ${batchNum}/${totalBatches}: ${result.success} success, ${result.failed} failed | Progress: ${processedRows}/${totalRows} (${progressPercent}%)`);
             errors.push(...result.errors.map(e => ({
               type: 'row_insert_failed' as const,
               message: e.error,
@@ -262,6 +309,7 @@ export class TransferService {
               details: e
             })));
           } catch (error: any) {
+            console.error(`❌ Batch insertion failed:`, error);
             errors.push({
               type: 'row_insert_failed',
               message: error.message,

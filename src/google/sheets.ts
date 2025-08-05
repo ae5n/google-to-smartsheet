@@ -78,7 +78,8 @@ export class GoogleSheetsService {
     encryptedTokens: EncryptedTokens,
     spreadsheetId: string,
     sheetTabs: string[],
-    includeFormulas: boolean = true
+    includeFormulas: boolean = true,
+    headerRowIndex?: number
   ): Promise<{ [tabName: string]: GoogleCellValue[][] }> {
     try {
       const sheetsClient = await this.createSheetsClient(encryptedTokens);
@@ -86,7 +87,13 @@ export class GoogleSheetsService {
 
       for (const tabName of sheetTabs) {
         try {
-          const range = `'${tabName}'`;
+          // If headerRowIndex is provided, get data starting from that row
+          // Otherwise get all data and let the caller handle it
+          const range = headerRowIndex !== undefined 
+            ? `'${tabName}'!A${headerRowIndex + 1}:ZZ` // Get from header row to end, all columns and rows
+            : `'${tabName}'`;
+          
+          
           const valueRenderOption = includeFormulas ? 'FORMULA' : 'FORMATTED_VALUE';
           
           const [valuesResponse, formulasResponse] = await Promise.all([
@@ -122,14 +129,22 @@ export class GoogleSheetsService {
   private processSheetData(values: any[][], formulas: any[][]): GoogleCellValue[][] {
     const processedData: GoogleCellValue[][] = [];
 
+    // Determine the maximum number of columns from header row or any row
+    const maxColumns = Math.max(
+      ...values.map(row => row?.length || 0),
+      ...formulas.map(row => row?.length || 0)
+    );
+
+
     for (let rowIndex = 0; rowIndex < values.length; rowIndex++) {
       const row = values[rowIndex] || [];
       const formulaRow = formulas[rowIndex] || [];
       const processedRow: GoogleCellValue[] = [];
 
-      for (let colIndex = 0; colIndex < row.length; colIndex++) {
-        const cellValue = row[colIndex];
-        const formula = formulaRow[colIndex];
+      // Process all columns up to maxColumns, not just row.length
+      for (let colIndex = 0; colIndex < maxColumns; colIndex++) {
+        const cellValue = row[colIndex] || ''; // Default to empty string for missing cells
+        const formula = formulaRow[colIndex] || '';
         
         const cellData: GoogleCellValue = {
           value: cellValue,
@@ -215,12 +230,40 @@ export class GoogleSheetsService {
       const rows = response.data.values || [];
       const bestHeaderRow = this.findBestHeaderRow(rows);
       
-      console.log(`🔍 Smart header detection: Found best header row at index ${bestHeaderRow.rowIndex + 1}`);
-      console.log(`📋 Headers found:`, bestHeaderRow.headers.slice(0, 5), '...');
+      console.log(`📋 Headers detected at row ${bestHeaderRow.rowIndex + 1} (${bestHeaderRow.headers.length} columns):`, bestHeaderRow.headers.slice(0, 10).join(', ') + (bestHeaderRow.headers.length > 10 ? '...' : ''));
       
       return bestHeaderRow.headers;
     } catch (error: any) {
       throw new Error(`Failed to get spreadsheet headers: ${error.message}`);
+    }
+  }
+
+  public async getSpreadsheetHeadersWithRowIndex(
+    encryptedTokens: EncryptedTokens,
+    spreadsheetId: string,
+    sheetTab: string
+  ): Promise<{ headers: string[]; headerRowIndex: number }> {
+    try {
+      const sheetsClient = await this.createSheetsClient(encryptedTokens);
+      
+      // Get first 5 rows to analyze for the best header row
+      const response = await sheetsClient.spreadsheets.values.get({
+        spreadsheetId,
+        range: `'${sheetTab}'!1:5`,
+        valueRenderOption: 'FORMATTED_VALUE'
+      });
+
+      const rows = response.data.values || [];
+      const bestHeaderRow = this.findBestHeaderRow(rows);
+      
+      console.log(`📋 Headers detected at row ${bestHeaderRow.rowIndex + 1} (${bestHeaderRow.headers.length} columns):`, bestHeaderRow.headers.slice(0, 10).join(', ') + (bestHeaderRow.headers.length > 10 ? '...' : ''));
+      
+      return {
+        headers: bestHeaderRow.headers,
+        headerRowIndex: bestHeaderRow.rowIndex
+      };
+    } catch (error: any) {
+      throw new Error(`Failed to get spreadsheet headers with row index: ${error.message}`);
     }
   }
 
