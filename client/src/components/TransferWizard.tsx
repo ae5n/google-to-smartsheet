@@ -148,7 +148,6 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
       const response = await googleAPI.getSpreadsheetHeaders(selectedSpreadsheet.spreadsheetId, selectedTabs[0]);
       if (response.data.success) {
         const headers = response.data.data || [];
-        console.log('Loaded Google headers:', headers);
         setGoogleHeaders(headers);
       } else {
         console.error('Failed to load headers:', response.data.error);
@@ -246,12 +245,7 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
           });
         }
 
-        console.log('Creating sheet with data:', {
-          name: newSheetName.trim(),
-          columns,
-          workspaceId: selectedWorkspace.id,
-          folderId: selectedFolder?.id
-        });
+        console.log('Creating sheet:', newSheetName.trim());
 
         const response = await smartsheetAPI.createSheet(
           newSheetName.trim(),
@@ -266,6 +260,34 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
 
         targetSheet = response.data.data!;
         setCreatedSheet(targetSheet);
+        
+        // Create proper column mappings using actual Smartsheet column IDs
+        const properMappings: ColumnMapping[] = [];
+        let smartsheetColumnIndex = 0;
+        
+        for (let i = 0; i < googleHeaders.length; i++) {
+          const header = googleHeaders[i];
+          
+          // Skip empty headers
+          if (!header || !header.trim()) {
+            continue;
+          }
+          
+          // Get corresponding Smartsheet column
+          const smartsheetColumn = targetSheet.columns[smartsheetColumnIndex];
+          if (smartsheetColumn) {
+            properMappings.push({
+              googleColumn: header.trim(),
+              smartsheetColumnId: smartsheetColumn.id,
+              dataType: 'text' as const
+            });
+            smartsheetColumnIndex++;
+          }
+        }
+
+        setColumnMappings(properMappings);
+        console.log('✓ Column mappings created:', properMappings.length, 'mappings');
+        
         toast.success('Smartsheet created successfully');
       } else {
         if (!selectedExistingSheet) {
@@ -273,9 +295,48 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
           return;
         }
         targetSheet = selectedExistingSheet;
+        
+        // Create column mappings for existing sheet
+        const existingMappings: ColumnMapping[] = [];
+        let smartsheetColumnIndex = 0;
+        
+        for (let i = 0; i < googleHeaders.length; i++) {
+          const header = googleHeaders[i];
+          
+          // Skip empty headers
+          if (!header || !header.trim()) {
+            continue;
+          }
+          
+          // Get corresponding Smartsheet column
+          const smartsheetColumn = targetSheet.columns[smartsheetColumnIndex];
+          if (smartsheetColumn) {
+            existingMappings.push({
+              googleColumn: header.trim(),
+              smartsheetColumnId: smartsheetColumn.id,
+              dataType: 'text' as const
+            });
+            smartsheetColumnIndex++;
+          }
+        }
+
+        setColumnMappings(existingMappings);
+        console.log('✓ Column mappings created for existing sheet:', existingMappings.length, 'mappings');
       }
 
       setExecutionStep('Creating transfer job...');
+
+      // Validate column mappings before creating job
+      if (columnMappings.length === 0) {
+        throw new Error('No valid column mappings found. Please check your Google Sheet headers.');
+      }
+
+      console.log('🚀 Creating transfer job:', {
+        spreadsheet: selectedSpreadsheet.title,
+        tabs: selectedTabs,
+        targetSheet: targetSheet.name,
+        mappingsCount: columnMappings.length
+      });
 
       // Create transfer job
       const jobResponse = await transferAPI.createJob({
@@ -287,7 +348,7 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
       });
 
       if (!jobResponse.data.success) {
-        throw new Error('Failed to create transfer job');
+        throw new Error(jobResponse.data.error || 'Failed to create transfer job');
       }
 
       const jobId = jobResponse.data.data?.jobId;

@@ -15,13 +15,20 @@ export class SmartsheetAPIService {
   private readonly baseUrl = 'https://api.smartsheet.com/2.0';
 
   private logApiResponse(endpoint: string, method: string, response: any, error?: any): void {
+    // Only log transfer-related operations and errors
+    const isTransferRelated = endpoint.includes('/sheets') && method === 'POST';
+    const hasError = !!error;
+    
+    if (!isTransferRelated && !hasError) {
+      return; // Skip logging for routine operations
+    }
+
     const logEntry = {
       timestamp: new Date().toISOString(),
       endpoint,
       method,
       status: error ? 'error' : 'success',
       statusCode: response?.status || error?.response?.status,
-      data: error ? undefined : response,
       error: error ? {
         message: error.message,
         code: error.code,

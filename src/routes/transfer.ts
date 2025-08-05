@@ -19,8 +19,14 @@ router.post('/jobs', [
   body('columnMappings.*.dataType').isIn(['text', 'number', 'date', 'image', 'hyperlink']).withMessage('Invalid data type'),
   body('dryRun').optional().isBoolean().withMessage('Dry run must be a boolean')
 ], async (req: Request, res: Response) => {
+  console.log('Transfer job creation request:', {
+    body: req.body,
+    userId: req.session.user?.id
+  });
+
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
+    console.log('Transfer job validation errors:', errors.array());
     return res.status(400).json({
       success: false,
       error: 'Validation failed',

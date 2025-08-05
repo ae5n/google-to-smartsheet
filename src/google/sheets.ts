@@ -205,19 +205,129 @@ export class GoogleSheetsService {
     try {
       const sheetsClient = await this.createSheetsClient(encryptedTokens);
       
+      // Get first 5 rows to analyze for the best header row
       const response = await sheetsClient.spreadsheets.values.get({
         spreadsheetId,
-        range: `'${sheetTab}'!1:1`,
+        range: `'${sheetTab}'!1:5`,
         valueRenderOption: 'FORMATTED_VALUE'
       });
 
-      const headerRow = response.data.values?.[0] || [];
-      return headerRow.map((header, index) => 
-        header ? String(header).trim() : `Column ${index + 1}`
-      );
+      const rows = response.data.values || [];
+      const bestHeaderRow = this.findBestHeaderRow(rows);
+      
+      console.log(`🔍 Smart header detection: Found best header row at index ${bestHeaderRow.rowIndex + 1}`);
+      console.log(`📋 Headers found:`, bestHeaderRow.headers.slice(0, 5), '...');
+      
+      return bestHeaderRow.headers;
     } catch (error: any) {
       throw new Error(`Failed to get spreadsheet headers: ${error.message}`);
     }
+  }
+
+  private findBestHeaderRow(rows: any[][]): { headers: string[]; rowIndex: number } {
+    let bestRow = { headers: [] as string[], rowIndex: 0, score: -1 };
+    
+    for (let rowIndex = 0; rowIndex < Math.min(rows.length, 5); rowIndex++) {
+      const row = rows[rowIndex] || [];
+      const processedHeaders = this.processHeaderRow(row);
+      const score = this.scoreHeaderRow(processedHeaders);
+      
+      if (score > bestRow.score) {
+        bestRow = {
+          headers: processedHeaders,
+          rowIndex,
+          score
+        };
+      }
+    }
+    
+    // If no good headers found, create generic column names
+    if (bestRow.score <= 0 && rows.length > 0) {
+      const maxColumns = Math.max(...rows.map(row => row.length));
+      bestRow.headers = Array.from({ length: maxColumns }, (_, i) => `Column ${i + 1}`);
+    }
+    
+    return bestRow;
+  }
+
+  private processHeaderRow(row: any[]): string[] {
+    return row.map((cell, index) => {
+      if (!cell || typeof cell !== 'string') {
+        return `Column ${index + 1}`;
+      }
+      
+      const cleaned = String(cell).trim();
+      
+      // Skip common non-header patterns
+      if (this.isNonHeaderContent(cleaned)) {
+        return `Column ${index + 1}`;
+      }
+      
+      return cleaned || `Column ${index + 1}`;
+    });
+  }
+
+  private scoreHeaderRow(headers: string[]): number {
+    let score = 0;
+    const nonGenericHeaders = headers.filter(h => !h.startsWith('Column '));
+    
+    // Base score: number of non-generic headers
+    score += nonGenericHeaders.length * 2;
+    
+    // Bonus for headers that look like actual column names
+    for (const header of nonGenericHeaders) {
+      // Short, concise headers get bonus points
+      if (header.length >= 2 && header.length <= 20) {
+        score += 1;
+      }
+      
+      // Headers with common column patterns
+      if (this.isLikelyColumnHeader(header)) {
+        score += 2;
+      }
+      
+      // Penalty for very long headers (likely content, not headers)
+      if (header.length > 50) {
+        score -= 1;
+      }
+    }
+    
+    // Bonus for having a reasonable number of headers (not too few, not too many)
+    const totalHeaders = headers.length;
+    if (totalHeaders >= 3 && totalHeaders <= 50) {
+      score += 1;
+    }
+    
+    return score;
+  }
+
+  private isNonHeaderContent(text: string): boolean {
+    // Skip empty or whitespace-only
+    if (!text || text.trim().length === 0) {
+      return true;
+    }
+    
+    // Skip common non-header patterns
+    const nonHeaderPatterns = [
+      /^\d+$/, // Just numbers
+      /^[A-Z]\d+$/, // Cell references like A1, B2
+      /^Page \d+/i, // Page numbers
+      /^Total|^Sum|^Average/i, // Summary rows
+      /^Note:|^Notes:/i, // Notes sections
+    ];
+    
+    return nonHeaderPatterns.some(pattern => pattern.test(text));
+  }
+
+  private isLikelyColumnHeader(text: string): boolean {
+    const headerPatterns = [
+      /^(id|name|title|description|type|status|date|time|amount|price|quantity|total)$/i,
+      /^(item|product|service|category|group|department|location|contact|email|phone)$/i,
+      /^(address|city|state|country|zip|code|number|reference|comment|note)$/i,
+      /\b(id|name|date|time|status|type|code)\b/i,
+    ];
+    
+    return headerPatterns.some(pattern => pattern.test(text));
   }
 
   public async validateSpreadsheetAccess(
