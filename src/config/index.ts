@@ -32,7 +32,7 @@ export const config = {
   smartsheet: {
     clientId: process.env.SMARTSHEET_CLIENT_ID || '',
     clientSecret: process.env.SMARTSHEET_CLIENT_SECRET || '',
-    scopes: ['READ_SHEETS', 'WRITE_SHEETS', 'SHARE_SHEETS'],
+    scopes: ['READ_SHEETS', 'WRITE_SHEETS', 'CREATE_SHEETS', 'SHARE_SHEETS'],
     redirectUri: `${process.env.BASE_URL || 'https://localhost:3443'}/auth/smartsheet/callback`
   },
   
