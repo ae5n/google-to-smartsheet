@@ -35,6 +35,11 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
   const [columnMappings, setColumnMappings] = useState<ColumnMapping[]>([]);
   const [googleHeaders, setGoogleHeaders] = useState<string[]>([]);
 
+  // Execution state
+  const [isExecuting, setIsExecuting] = useState(false);
+  const [executionStep, setExecutionStep] = useState('');
+  const [createdSheet, setCreatedSheet] = useState<SmartsheetSheet | null>(null);
+
   useEffect(() => {
     loadGoogleSheets();
     loadWorkspaces();
@@ -139,12 +144,21 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
     if (!selectedSpreadsheet || selectedTabs.length === 0) return;
 
     try {
+      setLoading(true);
       const response = await googleAPI.getSpreadsheetHeaders(selectedSpreadsheet.spreadsheetId, selectedTabs[0]);
       if (response.data.success) {
-        setGoogleHeaders(response.data.data || []);
+        const headers = response.data.data || [];
+        console.log('Loaded Google headers:', headers);
+        setGoogleHeaders(headers);
+      } else {
+        console.error('Failed to load headers:', response.data.error);
+        toast.error('Failed to load spreadsheet headers');
       }
     } catch (error) {
       console.error('Error loading headers:', error);
+      toast.error('Failed to load spreadsheet headers');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -186,6 +200,127 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
     
     if (currentIndex > 0) {
       setCurrentStep(steps[currentIndex - 1]);
+    }
+  };
+
+  const executeTransfer = async () => {
+    if (!selectedSpreadsheet || selectedTabs.length === 0) {
+      toast.error('Missing Google Sheet selection');
+      return;
+    }
+
+    if (googleHeaders.length === 0) {
+      toast.error('No headers found in Google Sheet. Please ensure your sheet has header rows.');
+      return;
+    }
+
+    setIsExecuting(true);
+    setExecutionStep('Preparing transfer...');
+
+    try {
+      let targetSheet: SmartsheetSheet;
+
+      if (targetOption === 'new') {
+        if (!newSheetName.trim() || !selectedWorkspace) {
+          toast.error('Missing sheet name or workspace selection');
+          return;
+        }
+
+        setExecutionStep('Creating new Smartsheet...');
+        
+        // Create basic columns based on Google headers, filtering out empty titles
+        const columns = googleHeaders
+          .map((header, index) => ({
+            title: header && header.trim() ? header.trim() : `Column ${index + 1}`,
+            type: 'TEXT_NUMBER' as const,
+            primary: index === 0
+          }))
+          .filter(col => col.title.length > 0); // Ensure no empty titles
+
+        // Ensure we have at least one column
+        if (columns.length === 0) {
+          columns.push({
+            title: 'Column 1',
+            type: 'TEXT_NUMBER' as const,
+            primary: true
+          });
+        }
+
+        console.log('Creating sheet with data:', {
+          name: newSheetName.trim(),
+          columns,
+          workspaceId: selectedWorkspace.id,
+          folderId: selectedFolder?.id
+        });
+
+        const response = await smartsheetAPI.createSheet(
+          newSheetName.trim(),
+          columns,
+          selectedWorkspace.id,
+          selectedFolder?.id
+        );
+
+        if (!response.data.success) {
+          throw new Error(response.data.error || 'Failed to create Smartsheet');
+        }
+
+        targetSheet = response.data.data!;
+        setCreatedSheet(targetSheet);
+        toast.success('Smartsheet created successfully');
+      } else {
+        if (!selectedExistingSheet) {
+          toast.error('No existing sheet selected');
+          return;
+        }
+        targetSheet = selectedExistingSheet;
+      }
+
+      setExecutionStep('Creating transfer job...');
+
+      // Create transfer job
+      const jobResponse = await transferAPI.createJob({
+        googleSpreadsheetId: selectedSpreadsheet.spreadsheetId,
+        googleSheetTabs: selectedTabs,
+        smartsheetId: targetSheet.id,
+        columnMappings: columnMappings,
+        dryRun: false
+      });
+
+      if (!jobResponse.data.success) {
+        throw new Error('Failed to create transfer job');
+      }
+
+      const jobId = jobResponse.data.data?.jobId;
+      if (!jobId) {
+        throw new Error('No job ID returned');
+      }
+
+      setExecutionStep('Transfer job created successfully!');
+      toast.success('Transfer started successfully');
+      
+      // Wait a moment then redirect
+      setTimeout(() => {
+        if (onJobCreated) {
+          onJobCreated(jobId);
+        }
+      }, 2000);
+
+    } catch (error: any) {
+      console.error('Transfer execution error:', error);
+      
+      let errorMessage = 'Failed to execute transfer';
+      if (error.response?.data?.error) {
+        errorMessage = error.response.data.error;
+      } else if (error.response?.data?.details) {
+        errorMessage = `Validation error: ${error.response.data.details.map((d: any) => d.msg).join(', ')}`;
+      } else if (error.message) {
+        errorMessage = error.message;
+      }
+      
+      toast.error(errorMessage);
+      setExecutionStep(`Transfer failed: ${errorMessage}`);
+    } finally {
+      setIsExecuting(false);
     }
   };
 
@@ -473,8 +608,13 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
         <div className="mt-4">
           <button
             type="button"
-            onClick={() => setCurrentStep('execution')}
+            onClick={() => {
+              setCurrentStep('execution');
+              // Start execution immediately when moving to execution step
+              setTimeout(executeTransfer, 500);
+            }}
             className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+            disabled={loading}
           >
             Start Transfer
           </button>
@@ -487,10 +627,68 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
     <div className="space-y-6">
       <div>
         <h3 className="text-lg font-medium text-gray-900 mb-4">Transfer Execution</h3>
-        <div className="bg-blue-50 p-4 rounded-lg">
-          <p className="text-blue-800">Transfer execution functionality will be implemented here.</p>
-          <p className="text-sm text-blue-600 mt-2">This will include progress tracking and real-time updates.</p>
-        </div>
+        
+        {isExecuting ? (
+          <div className="bg-blue-50 p-6 rounded-lg">
+            <div className="flex items-center space-x-3 mb-4">
+              <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+              <span className="text-blue-800 font-medium">Executing Transfer...</span>
+            </div>
+            
+            <div className="bg-white p-4 rounded-md border border-blue-200">
+              <p className="text-sm text-gray-700">{executionStep}</p>
+            </div>
+
+            {createdSheet && (
+              <div className="mt-4 bg-green-50 p-3 rounded-md border border-green-200">
+                <p className="text-sm text-green-800">
+                  ✓ New sheet created: <strong>{createdSheet.name}</strong>
+                </p>
+                <a 
+                  href={createdSheet.permalink} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="text-sm text-green-600 hover:text-green-800 underline"
+                >
+                  View in Smartsheet →
+                </a>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {executionStep.includes('failed') ? (
+              <div className="bg-red-50 p-4 rounded-lg border border-red-200">
+                <p className="text-red-800">{executionStep}</p>
+                <button
+                  type="button"
+                  onClick={executeTransfer}
+                  className="mt-3 px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700"
+                >
+                  Retry Transfer
+                </button>
+              </div>
+            ) : executionStep.includes('successfully') ? (
+              <div className="bg-green-50 p-4 rounded-lg border border-green-200">
+                <p className="text-green-800 font-medium">{executionStep}</p>
+                <p className="text-sm text-green-700 mt-2">
+                  Redirecting to job monitoring page...
+                </p>
+              </div>
+            ) : (
+              <div className="bg-gray-50 p-4 rounded-lg">
+                <p className="text-gray-700">Ready to start transfer...</p>
+                <button
+                  type="button"
+                  onClick={executeTransfer}
+                  className="mt-3 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                >
+                  Execute Transfer
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
