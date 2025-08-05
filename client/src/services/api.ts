@@ -76,14 +76,28 @@ export const googleAPI = {
 
 // Smartsheet API
 export const smartsheetAPI = {
+  getWorkspaces: (): Promise<AxiosResponse<APIResponse<any[]>>> =>
+    api.get('/api/smartsheet/workspaces'),
+
+  getWorkspaceFolders: (workspaceId: number): Promise<AxiosResponse<APIResponse<any[]>>> =>
+    api.get(`/api/smartsheet/workspaces/${workspaceId}/folders`),
+
+  createFolder: (workspaceId: number, name: string): Promise<AxiosResponse<APIResponse<any>>> =>
+    api.post(`/api/smartsheet/workspaces/${workspaceId}/folders`, { name }),
+
   getSheets: (): Promise<AxiosResponse<APIResponse<SmartsheetSheet[]>>> =>
     api.get('/api/smartsheet/sheets'),
 
   getSheetDetails: (sheetId: number): Promise<AxiosResponse<APIResponse<SmartsheetSheet>>> =>
     api.get(`/api/smartsheet/sheets/${sheetId}`),
 
-  createSheet: (name: string, columns: Array<{ title: string; type: string; primary?: boolean }>): Promise<AxiosResponse<APIResponse<SmartsheetSheet>>> =>
-    api.post('/api/smartsheet/sheets', { name, columns }),
+  createSheet: (
+    name: string, 
+    columns: Array<{ title: string; type: string; primary?: boolean }>,
+    workspaceId?: number,
+    folderId?: number
+  ): Promise<AxiosResponse<APIResponse<SmartsheetSheet>>> =>
+    api.post('/api/smartsheet/sheets', { name, columns, workspaceId, folderId }),
 
   addColumns: (sheetId: number, columns: Array<{ title: string; type: string }>): Promise<AxiosResponse<APIResponse<any[]>>> =>
     api.post(`/api/smartsheet/sheets/${sheetId}/columns`, { columns }),

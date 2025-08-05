@@ -10,6 +10,133 @@ const router = Router();
 
 router.use(requireAuth);
 
+router.get('/workspaces', async (req: Request, res: Response) => {
+  try {
+    const user = await database.getUserById(req.session.user!.id);
+    
+    if (!user?.smartsheetTokens) {
+      return res.status(400).json({
+        success: false,
+        error: 'Smartsheet account not connected'
+      } as APIResponse);
+    }
+
+    const validTokens = await smartsheetAuthService.validateAndRefreshTokens(
+      user.id,
+      user.smartsheetTokens
+    );
+
+    const workspaces = await smartsheetAPIService.getUserWorkspaces(validTokens);
+
+    res.json({
+      success: true,
+      data: workspaces
+    } as APIResponse);
+  } catch (error: any) {
+    if (error.message.includes('Token expired')) {
+      res.status(401).json({
+        success: false,
+        error: 'Smartsheet authentication expired. Please reconnect your account.'
+      } as APIResponse);
+    } else {
+      res.status(500).json({
+        success: false,
+        error: error.message
+      } as APIResponse);
+    }
+  }
+});
+
+router.get('/workspaces/:workspaceId/folders', async (req: Request, res: Response) => {
+  try {
+    const workspaceId = parseInt(req.params.workspaceId);
+    
+    if (isNaN(workspaceId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid workspace ID'
+      } as APIResponse);
+    }
+
+    const user = await database.getUserById(req.session.user!.id);
+    
+    if (!user?.smartsheetTokens) {
+      return res.status(400).json({
+        success: false,
+        error: 'Smartsheet account not connected'
+      } as APIResponse);
+    }
+
+    const validTokens = await smartsheetAuthService.validateAndRefreshTokens(
+      user.id,
+      user.smartsheetTokens
+    );
+
+    const folders = await smartsheetAPIService.getWorkspaceFolders(validTokens, workspaceId);
+
+    res.json({
+      success: true,
+      data: folders
+    } as APIResponse);
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    } as APIResponse);
+  }
+});
+
+router.post('/workspaces/:workspaceId/folders', [
+  body('name').notEmpty().isLength({ min: 1, max: 100 }).withMessage('Folder name is required and must be 1-100 characters')
+], async (req: Request, res: Response) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({
+      success: false,
+      error: 'Validation failed',
+      details: errors.array()
+    } as APIResponse);
+  }
+
+  try {
+    const workspaceId = parseInt(req.params.workspaceId);
+    const { name } = req.body;
+    
+    if (isNaN(workspaceId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid workspace ID'
+      } as APIResponse);
+    }
+
+    const user = await database.getUserById(req.session.user!.id);
+    
+    if (!user?.smartsheetTokens) {
+      return res.status(400).json({
+        success: false,
+        error: 'Smartsheet account not connected'
+      } as APIResponse);
+    }
+
+    const validTokens = await smartsheetAuthService.validateAndRefreshTokens(
+      user.id,
+      user.smartsheetTokens
+    );
+
+    const folder = await smartsheetAPIService.createFolderInWorkspace(validTokens, workspaceId, name);
+
+    res.json({
+      success: true,
+      data: folder
+    } as APIResponse);
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    } as APIResponse);
+  }
+});
+
 router.get('/sheets', async (req: Request, res: Response) => {
   try {
     const user = await database.getUserById(req.session.user!.id);
@@ -90,7 +217,9 @@ router.post('/sheets', [
   body('name').notEmpty().isLength({ min: 1, max: 100 }).withMessage('Sheet name is required and must be 1-100 characters'),
   body('columns').isArray({ min: 1 }).withMessage('At least one column is required'),
   body('columns.*.title').notEmpty().withMessage('Column title is required'),
-  body('columns.*.type').optional().isIn(['TEXT_NUMBER', 'DATE', 'DATETIME', 'CONTACT_LIST', 'CHECKBOX', 'PICKLIST', 'DURATION']).withMessage('Invalid column type')
+  body('columns.*.type').optional().isIn(['TEXT_NUMBER', 'DATE', 'DATETIME', 'CONTACT_LIST', 'CHECKBOX', 'PICKLIST', 'DURATION']).withMessage('Invalid column type'),
+  body('workspaceId').optional().isNumeric().withMessage('Workspace ID must be numeric'),
+  body('folderId').optional().isNumeric().withMessage('Folder ID must be numeric')
 ], async (req: Request, res: Response) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -102,7 +231,7 @@ router.post('/sheets', [
   }
 
   try {
-    const { name, columns } = req.body;
+    const { name, columns, workspaceId, folderId } = req.body;
     const user = await database.getUserById(req.session.user!.id);
     
     if (!user?.smartsheetTokens) {
@@ -117,7 +246,13 @@ router.post('/sheets', [
       user.smartsheetTokens
     );
 
-    const sheet = await smartsheetAPIService.createSheet(validTokens, name, columns);
+    const sheet = await smartsheetAPIService.createSheet(
+      validTokens, 
+      name, 
+      columns,
+      workspaceId ? parseInt(workspaceId) : undefined,
+      folderId ? parseInt(folderId) : undefined
+    );
 
     res.json({
       success: true,

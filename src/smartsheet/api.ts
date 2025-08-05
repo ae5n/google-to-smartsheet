@@ -14,6 +14,24 @@ import {
 export class SmartsheetAPIService {
   private readonly baseUrl = 'https://api.smartsheet.com/2.0';
 
+  private logApiResponse(endpoint: string, method: string, response: any, error?: any): void {
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      endpoint,
+      method,
+      status: error ? 'error' : 'success',
+      statusCode: response?.status || error?.response?.status,
+      data: error ? undefined : response,
+      error: error ? {
+        message: error.message,
+        code: error.code,
+        response: error.response?.data
+      } : undefined
+    };
+
+    console.log(`[Smartsheet API] ${method} ${endpoint}:`, JSON.stringify(logEntry, null, 2));
+  }
+
   public async getUserSheets(encryptedTokens: EncryptedTokens): Promise<SmartsheetSheet[]> {
     try {
       const response = await smartsheetAuthService.makeAuthenticatedRequest(
@@ -22,6 +40,8 @@ export class SmartsheetAPIService {
         '/sheets'
       );
 
+      this.logApiResponse('/sheets', 'GET', response);
+
       return response.data.map((sheet: any) => ({
         id: sheet.id,
         name: sheet.name,
@@ -29,7 +49,80 @@ export class SmartsheetAPIService {
         permalink: sheet.permalink
       }));
     } catch (error: any) {
+      this.logApiResponse('/sheets', 'GET', null, error);
       throw new Error(`Failed to fetch Smartsheet sheets: ${error.message}`);
+    }
+  }
+
+  public async getUserWorkspaces(encryptedTokens: EncryptedTokens): Promise<any[]> {
+    try {
+      const response = await smartsheetAuthService.makeAuthenticatedRequest(
+        encryptedTokens,
+        'GET',
+        '/workspaces'
+      );
+
+      this.logApiResponse('/workspaces', 'GET', response);
+
+      return response.data.map((workspace: any) => ({
+        id: workspace.id,
+        name: workspace.name,
+        permalink: workspace.permalink
+      }));
+    } catch (error: any) {
+      this.logApiResponse('/workspaces', 'GET', null, error);
+      throw new Error(`Failed to fetch workspaces: ${error.message}`);
+    }
+  }
+
+  public async getWorkspaceFolders(encryptedTokens: EncryptedTokens, workspaceId: number): Promise<any[]> {
+    try {
+      const response = await smartsheetAuthService.makeAuthenticatedRequest(
+        encryptedTokens,
+        'GET',
+        `/workspaces/${workspaceId}`
+      );
+
+      this.logApiResponse(`/workspaces/${workspaceId}`, 'GET', response);
+
+      return (response.folders || []).map((folder: any) => ({
+        id: folder.id,
+        name: folder.name,
+        permalink: folder.permalink
+      }));
+    } catch (error: any) {
+      this.logApiResponse(`/workspaces/${workspaceId}`, 'GET', null, error);
+      throw new Error(`Failed to fetch workspace folders: ${error.message}`);
+    }
+  }
+
+  public async createFolderInWorkspace(
+    encryptedTokens: EncryptedTokens,
+    workspaceId: number,
+    folderName: string
+  ): Promise<any> {
+    try {
+      const folderData = {
+        name: folderName
+      };
+
+      const response = await smartsheetAuthService.makeAuthenticatedRequest(
+        encryptedTokens,
+        'POST',
+        `/workspaces/${workspaceId}/folders`,
+        folderData
+      );
+
+      this.logApiResponse(`/workspaces/${workspaceId}/folders`, 'POST', response);
+
+      return {
+        id: response.result.id,
+        name: response.result.name,
+        permalink: response.result.permalink
+      };
+    } catch (error: any) {
+      this.logApiResponse(`/workspaces/${workspaceId}/folders`, 'POST', null, error);
+      throw new Error(`Failed to create folder: ${error.message}`);
     }
   }
 
@@ -40,6 +133,8 @@ export class SmartsheetAPIService {
         'GET',
         `/sheets/${sheetId}`
       );
+
+      this.logApiResponse(`/sheets/${sheetId}`, 'GET', response);
 
       const sheet = response;
       
@@ -56,6 +151,7 @@ export class SmartsheetAPIService {
         permalink: sheet.permalink
       };
     } catch (error: any) {
+      this.logApiResponse(`/sheets/${sheetId}`, 'GET', null, error);
       throw new Error(`Failed to get sheet details: ${error.message}`);
     }
   }
@@ -63,7 +159,9 @@ export class SmartsheetAPIService {
   public async createSheet(
     encryptedTokens: EncryptedTokens,
     name: string,
-    columns: Array<{ title: string; type: string; primary?: boolean }>
+    columns: Array<{ title: string; type: string; primary?: boolean }>,
+    workspaceId?: number,
+    folderId?: number
   ): Promise<SmartsheetSheet> {
     try {
       const sheetData = {
@@ -75,12 +173,21 @@ export class SmartsheetAPIService {
         }))
       };
 
+      let endpoint = '/sheets';
+      if (folderId) {
+        endpoint = `/folders/${folderId}/sheets`;
+      } else if (workspaceId) {
+        endpoint = `/workspaces/${workspaceId}/sheets`;
+      }
+
       const response = await smartsheetAuthService.makeAuthenticatedRequest(
         encryptedTokens,
         'POST',
-        '/sheets',
+        endpoint,
         sheetData
       );
+
+      this.logApiResponse(endpoint, 'POST', response);
 
       return {
         id: response.result.id,
@@ -95,6 +202,9 @@ export class SmartsheetAPIService {
         permalink: response.result.permalink
       };
     } catch (error: any) {
+      const endpoint = folderId ? `/folders/${folderId}/sheets` : 
+                     workspaceId ? `/workspaces/${workspaceId}/sheets` : '/sheets';
+      this.logApiResponse(endpoint, 'POST', null, error);
       throw new Error(`Failed to create sheet: ${error.message}`);
     }
   }

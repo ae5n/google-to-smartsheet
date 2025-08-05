@@ -36,6 +36,18 @@ export interface SmartsheetColumn {
   index: number;
 }
 
+export interface SmartsheetWorkspace {
+  id: number;
+  name: string;
+  permalink: string;
+}
+
+export interface SmartsheetFolder {
+  id: number;
+  name: string;
+  permalink: string;
+}
+
 export interface ColumnMapping {
   googleColumn: string;
   smartsheetColumnId: number;
