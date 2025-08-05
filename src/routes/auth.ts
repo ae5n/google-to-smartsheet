@@ -187,11 +187,23 @@ router.get('/smartsheet/callback', async (req: Request, res: Response) => {
 
 router.post('/smartsheet/disconnect', requireAuth, async (req: Request, res: Response) => {
   try {
+    console.log('Smartsheet disconnect request:', {
+      userId: req.session.user?.id,
+      sessionExists: !!req.session,
+      userExists: !!req.session.user
+    });
+
     const user = await database.getUserById(req.session.user!.id);
+    console.log('User found:', {
+      userId: user?.id,
+      hasSmartsheetTokens: !!user?.smartsheetTokens
+    });
     
     if (user?.smartsheetTokens) {
+      console.log('Revoking Smartsheet tokens...');
       await smartsheetAuthService.revokeTokens(user.smartsheetTokens);
       await database.updateUserTokens(user.id, 'smartsheet', null);
+      console.log('Tokens revoked successfully');
     }
 
     if (req.session.user) {
@@ -205,10 +217,12 @@ router.post('/smartsheet/disconnect', requireAuth, async (req: Request, res: Res
       message: 'Smartsheet account disconnected successfully' 
     } as APIResponse);
   } catch (error: any) {
+    console.error('Smartsheet disconnect error:', error);
     authLogger(req, 'smartsheet_disconnect', false, error.message);
     res.status(500).json({ 
       success: false, 
-      error: 'Failed to disconnect Smartsheet account' 
+      error: 'Failed to disconnect Smartsheet account',
+      details: error.message 
     } as APIResponse);
   }
 });

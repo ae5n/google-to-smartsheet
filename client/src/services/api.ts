@@ -18,9 +18,14 @@ const api = axios.create({
   timeout: 60000,
 });
 
-// Add CSRF token to requests
+// Add CSRF token and ensure proper headers for requests
 api.interceptors.request.use(async (config) => {
   if (['post', 'put', 'patch', 'delete'].includes(config.method?.toLowerCase() || '')) {
+    // Ensure Content-Type is set for POST requests
+    if (!config.headers['Content-Type']) {
+      config.headers['Content-Type'] = 'application/json';
+    }
+    
     try {
       const response = await axios.get('/api/csrf-token', {
         withCredentials: true
@@ -48,7 +53,7 @@ export const authAPI = {
     api.post('/auth/google/disconnect'),
 
   disconnectSmartsheet: (): Promise<AxiosResponse<APIResponse>> =>
-    api.post('/auth/smartsheet/disconnect'),
+    api.post('/auth/smartsheet/disconnect', {}),
 
   logout: (): Promise<AxiosResponse<APIResponse>> =>
     api.post('/auth/logout'),
