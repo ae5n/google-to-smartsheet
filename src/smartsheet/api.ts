@@ -535,6 +535,37 @@ export class SmartsheetAPIService {
       throw new Error(`Failed to delete sheet: ${error.message}`);
     }
   }
+
+  public async updateCellWithUrl(
+    encryptedTokens: EncryptedTokens,
+    sheetId: number,
+    rowId: number,
+    columnId: number,
+    imageUrl: string
+  ): Promise<void> {
+    try {
+      const cellUpdate = {
+        id: rowId,
+        cells: [{
+          columnId: columnId,
+          value: 'Image Link',
+          hyperlink: {
+            url: imageUrl,
+            text: 'Image Link'
+          }
+        }]
+      };
+
+      await smartsheetAuthService.makeAuthenticatedRequest(
+        encryptedTokens,
+        'PUT',
+        `/sheets/${sheetId}/rows`,
+        [cellUpdate]
+      );
+    } catch (error: any) {
+      throw new Error(`Failed to update cell with URL: ${error.message}`);
+    }
+  }
 }
 
 export const smartsheetAPIService = new SmartsheetAPIService();

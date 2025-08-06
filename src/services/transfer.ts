@@ -447,18 +447,19 @@ export class TransferService {
           imageId
         }
       };
-    } catch (error) {
-      // Fallback: try to attach as file or use text
-      try {
+    } catch (error: any) {
+      // Fallback: use URL as hyperlink when image processing fails
+      console.log(`⚠️ Image processing failed, falling back to URL: ${googleCell.imageUrl} - ${error.message}`);
+      if (googleCell.imageUrl) {
         return {
           columnId,
-          value: googleCell.imageUrl || '',
+          value: 'Image Link',
           hyperlink: {
-            url: googleCell.imageUrl || '',
+            url: googleCell.imageUrl,
             text: 'Image Link'
           }
         };
-      } catch {
+      } else {
         return {
           columnId,
           value: googleCell.value || 'Image not accessible'
@@ -501,15 +502,15 @@ export class TransferService {
     console.log(`📊 Processing ${imageQueue.length} images for ${insertedRows.length} inserted rows`);
     
     for (const imageItem of imageQueue) {
-      try {
-        // Find the corresponding inserted row
-        const insertedRow = insertedRows[imageItem.rowIndex];
-        if (!insertedRow || !insertedRow.id) {
-          console.log(`⚠️ Could not find inserted row for index ${imageItem.rowIndex}. Available rows: ${insertedRows.length}`);
-          console.log(`⚠️ Row structure:`, insertedRows[0] ? JSON.stringify(insertedRows[0], null, 2) : 'No rows');
-          continue;
-        }
+      // Find the corresponding inserted row first (outside try block)
+      const insertedRow = insertedRows[imageItem.rowIndex];
+      if (!insertedRow || !insertedRow.id) {
+        console.log(`⚠️ Could not find inserted row for index ${imageItem.rowIndex}. Available rows: ${insertedRows.length}`);
+        console.log(`⚠️ Row structure:`, insertedRows[0] ? JSON.stringify(insertedRows[0], null, 2) : 'No rows');
+        continue;
+      }
 
+      try {
         console.log(`📥 Downloading image: ${imageItem.imageUrl}`);
         
         // Download the image
@@ -535,7 +536,21 @@ export class TransferService {
         console.log(`✅ Image successfully added to cell`);
       } catch (error: any) {
         console.log(`❌ Failed to process image: ${error.message}`);
-        // Continue with other images even if one fails
+        console.log(`🔄 Falling back to URL hyperlink for image: ${imageItem.imageUrl}`);
+        
+        // Fallback: update cell with URL hyperlink
+        try {
+          await smartsheetAPIService.updateCellWithUrl(
+            smartsheetTokens,
+            sheetId,
+            insertedRow.id,
+            imageItem.columnId,
+            imageItem.imageUrl
+          );
+          console.log(`✅ URL fallback successful for image`);
+        } catch (fallbackError: any) {
+          console.log(`❌ URL fallback also failed: ${fallbackError.message}`);
+        }
       }
     }
   }
