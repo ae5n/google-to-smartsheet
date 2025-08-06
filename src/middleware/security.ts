@@ -27,18 +27,18 @@ export const rateLimiter = rateLimit({
   message: 'Too many requests from this IP, please try again later',
   standardHeaders: true,
   legacyHeaders: false,
-  // Skip rate limiting in production to avoid proxy trust issues
-  skip: (req) => process.env.NODE_ENV === 'production',
+  // Use a custom key generator to avoid trust proxy issues
+  keyGenerator: (req) => req.ip || 'unknown',
 });
 
 export const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 10, // limit each IP to 10 auth requests per windowMs
-  // Skip rate limiting in production to avoid proxy trust issues
-  skip: (req) => process.env.NODE_ENV === 'production',
   message: 'Too many authentication attempts, please try again later',
   standardHeaders: true,
   legacyHeaders: false,
+  // Use a custom key generator to avoid trust proxy issues
+  keyGenerator: (req) => req.ip || 'unknown',
 });
 
 export const csrfProtection = (req: Request, res: Response, next: NextFunction): void => {

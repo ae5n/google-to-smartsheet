@@ -143,7 +143,11 @@ export class TransferService {
             {
               type: 'general_error' as const,
               message: error.message,
-              details: error
+              details: {
+                name: error.name,
+                message: error.message,
+                stack: error.stack
+              }
             }
           ]
         };
@@ -391,7 +395,11 @@ export class TransferService {
               type: 'row_insert_failed',
               message: error.message,
               row: processedRows + smartsheetRows.length,
-              details: error
+              details: {
+                name: error.name,
+                message: error.message,
+                stack: error.stack
+              }
             });
           }
         }
@@ -465,7 +473,11 @@ export class TransferService {
             errors.push({
               type: 'row_insert_failed',
               message: error.message,
-              details: error
+              details: {
+                name: error.name,
+                message: error.message,
+                stack: error.stack
+              }
             });
           }
         }

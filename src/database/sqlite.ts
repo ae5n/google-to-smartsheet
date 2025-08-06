@@ -186,7 +186,7 @@ class SQLiteDatabaseManager {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    stmt.run(
+    const params = [
       job.id,
       job.userId,
       job.googleSpreadsheetId,
@@ -196,10 +196,15 @@ class SQLiteDatabaseManager {
       job.status,
       job.progress ? JSON.stringify(job.progress) : null,
       job.logs ? JSON.stringify(job.logs) : null,
-      job.dryRun || false,
-      job.headerRowIndex || null,
+      job.dryRun ? 1 : 0, // Convert boolean to integer
+      job.headerRowIndex ?? null,
       job.selectedColumns ? JSON.stringify(job.selectedColumns) : null
-    );
+    ];
+
+    // Debug: Log parameter types to identify the problematic one
+    console.log('SQLite parameters:', params.map((p, i) => `${i}: ${typeof p} = ${p}`));
+
+    stmt.run(...params);
 
     const newJob: TransferJob = {
       ...job,
@@ -221,7 +226,7 @@ class SQLiteDatabaseManager {
   }
 
   public async updateTransferJobStatus(id: string, status: TransferJob['status'], progress?: TransferJob['progress']): Promise<void> {
-    let query = 'UPDATE transfer_jobs SET status = ?, updated_at = CURRENT_TIMESTAMP';
+    let query = 'UPDATE transfer_jobs SET status = ?';
     const params: any[] = [status];
 
     if (progress) {
