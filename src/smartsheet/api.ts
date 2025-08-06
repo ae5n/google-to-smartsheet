@@ -262,6 +262,45 @@ export class SmartsheetAPIService {
     }
   }
 
+  public async addImageToCell(
+    encryptedTokens: EncryptedTokens,
+    sheetId: number,
+    rowId: number,
+    columnId: number,
+    imageBuffer: Buffer,
+    filename: string,
+    mimeType: string
+  ): Promise<string> {
+    try {
+      const tokens = encryptionService.decryptTokens(encryptedTokens.encryptedData);
+
+      const response = await axios.post(
+        `${this.baseUrl}/sheets/${sheetId}/rows/${rowId}/columns/${columnId}/cellimages`,
+        imageBuffer,
+        {
+          headers: {
+            'Authorization': `Bearer ${tokens.accessToken}`,
+            'Content-Type': mimeType,
+            'Content-Disposition': `attachment; filename="${filename}"`,
+            'Content-Length': imageBuffer.length.toString()
+          },
+          maxContentLength: 10 * 1024 * 1024, // 10MB limit
+          timeout: 60000 // 60 seconds timeout
+        }
+      );
+
+      return response.data.id;
+    } catch (error: any) {
+      if (error.response?.status === 413) {
+        throw new Error('Image file too large');
+      }
+      if (error.response?.status === 415) {
+        throw new Error('Unsupported image format');
+      }
+      throw new Error(`Failed to add image to cell: ${error.message}`);
+    }
+  }
+
   public async uploadImage(
     encryptedTokens: EncryptedTokens,
     imageBuffer: Buffer,
@@ -319,12 +358,13 @@ export class SmartsheetAPIService {
       toTop?: boolean;
       toBottom?: boolean;
     }>
-  ): Promise<{ success: number; failed: number; errors: Array<{ row: number; error: string }> }> {
+  ): Promise<{ success: number; failed: number; errors: Array<{ row: number; error: string }>; result?: any[] }> {
     try {
       const batchSize = 100; // Smartsheet API limit
       let totalSuccess = 0;
       let totalFailed = 0;
       const allErrors: Array<{ row: number; error: string }> = [];
+      let allInsertedRows: any[] = [];
 
       for (let i = 0; i < rows.length; i += batchSize) {
         const batch = rows.slice(i, i + batchSize);
@@ -343,6 +383,7 @@ export class SmartsheetAPIService {
           const result = response.result || response;
           if (Array.isArray(result)) {
             totalSuccess += result.length;
+            allInsertedRows = allInsertedRows.concat(result);
           } else {
             totalSuccess += batch.length;
           }
@@ -369,7 +410,8 @@ export class SmartsheetAPIService {
       return {
         success: totalSuccess,
         failed: totalFailed,
-        errors: allErrors
+        errors: allErrors,
+        result: allInsertedRows
       };
     } catch (error: any) {
       throw new Error(`Failed to add rows: ${error.message}`);

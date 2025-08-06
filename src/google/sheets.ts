@@ -162,7 +162,17 @@ export class GoogleSheetsService {
 
           const hyperlinkMatch = this.extractHyperlinkFromFormula(formula);
           if (hyperlinkMatch && !cellData.isImage) {
-            cellData.hyperlink = hyperlinkMatch;
+            // Check if hyperlink contains a Google Drive image
+            if (hyperlinkMatch.includes('drive.google.com/file/d/')) {
+              const driveId = hyperlinkMatch.match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/)?.[1];
+              if (driveId) {
+                cellData.isImage = true;
+                cellData.imageUrl = `https://drive.google.com/uc?export=download&id=${driveId}`;
+                cellData.imageId = driveId;
+              }
+            } else {
+              cellData.hyperlink = hyperlinkMatch;
+            }
           }
         }
 

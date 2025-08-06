@@ -258,14 +258,18 @@ export class TransferService {
       for (let i = 0; i < dataRows.length; i += batchSize) {
         const batch = dataRows.slice(i, i + batchSize);
         const smartsheetRows: Array<{ cells: SmartsheetCellValue[] }> = [];
+        const imageQueue: Array<{ rowIndex: number; columnId: number; imageUrl: string; imageId?: string }> = [];
 
-        for (const googleRow of batch) {
+        for (let rowIndex = 0; rowIndex < batch.length; rowIndex++) {
+          const googleRow = batch[rowIndex];
           try {
             const smartsheetCells = await this.convertRowToSmartsheet(
               googleRow,
               job.columnMappings,
               googleTokens,
-              smartsheetTokens
+              smartsheetTokens,
+              imageQueue,
+              rowIndex
             );
 
 
@@ -302,6 +306,18 @@ export class TransferService {
             const totalBatches = Math.ceil(dataRows.length / batchSize);
             const progressPercent = Math.round((processedRows / totalRows) * 100);
             console.log(`✅ Batch ${batchNum}/${totalBatches}: ${result.success} success, ${result.failed} failed | Progress: ${processedRows}/${totalRows} (${progressPercent}%)`);
+            
+            // Process images for successfully inserted rows
+            if (imageQueue.length > 0 && result.success > 0) {
+              await this.processImageQueue(
+                imageQueue, 
+                result, 
+                job.smartsheetId,
+                googleTokens,
+                smartsheetTokens
+              );
+            }
+            
             errors.push(...result.errors.map(e => ({
               type: 'row_insert_failed' as const,
               message: e.error,
@@ -334,7 +350,9 @@ export class TransferService {
     googleRow: GoogleCellValue[],
     columnMappings: ColumnMapping[],
     googleTokens: EncryptedTokens,
-    smartsheetTokens: EncryptedTokens
+    smartsheetTokens: EncryptedTokens,
+    imageQueue?: Array<{ rowIndex: number; columnId: number; imageUrl: string; imageId?: string }>,
+    currentRowIndex?: number
   ): Promise<SmartsheetCellValue[]> {
     const smartsheetCells: SmartsheetCellValue[] = [];
 
@@ -352,14 +370,21 @@ export class TransferService {
 
       try {
         if (googleCell.isImage && googleCell.imageUrl) {
-          // Handle image cell
-          const imageCell = await this.processImageCell(
-            googleCell,
-            mapping.smartsheetColumnId,
-            googleTokens,
-            smartsheetTokens
-          );
-          smartsheetCells.push(imageCell);
+          // Create placeholder cell for image (will add actual image after row creation)
+          smartsheetCells.push({
+            columnId: mapping.smartsheetColumnId,
+            value: 'Loading image...'
+          });
+          
+          // Add to image queue for later processing
+          if (imageQueue && currentRowIndex !== undefined) {
+            imageQueue.push({
+              rowIndex: currentRowIndex,
+              columnId: mapping.smartsheetColumnId,
+              imageUrl: googleCell.imageUrl,
+              imageId: googleCell.imageId
+            });
+          }
         } else if (googleCell.hyperlink && mapping.dataType === 'hyperlink') {
           // Handle hyperlink cell
           smartsheetCells.push({
@@ -457,6 +482,61 @@ export class TransferService {
         return isNaN(date.getTime()) ? value : date.toISOString().split('T')[0];
       default:
         return String(value);
+    }
+  }
+
+  private async processImageQueue(
+    imageQueue: Array<{ rowIndex: number; columnId: number; imageUrl: string; imageId?: string }>,
+    insertResult: any,
+    sheetId: number,
+    googleTokens: EncryptedTokens,
+    smartsheetTokens: EncryptedTokens
+  ): Promise<void> {
+    // Debug: log the structure to understand what we're getting
+    console.log(`🔍 Insert result structure:`, JSON.stringify(insertResult, null, 2));
+    
+    // Get the actual row IDs from the insert result - try different possible structures
+    const insertedRows = insertResult.result || insertResult.data || insertResult || [];
+    
+    console.log(`📊 Processing ${imageQueue.length} images for ${insertedRows.length} inserted rows`);
+    
+    for (const imageItem of imageQueue) {
+      try {
+        // Find the corresponding inserted row
+        const insertedRow = insertedRows[imageItem.rowIndex];
+        if (!insertedRow || !insertedRow.id) {
+          console.log(`⚠️ Could not find inserted row for index ${imageItem.rowIndex}. Available rows: ${insertedRows.length}`);
+          console.log(`⚠️ Row structure:`, insertedRows[0] ? JSON.stringify(insertedRows[0], null, 2) : 'No rows');
+          continue;
+        }
+
+        console.log(`📥 Downloading image: ${imageItem.imageUrl}`);
+        
+        // Download the image
+        const imageData = await googleDriveService.downloadImage(
+          googleTokens,
+          imageItem.imageUrl,
+          imageItem.imageId
+        );
+
+        console.log(`📤 Adding image to cell: Row ${insertedRow.id}, Column ${imageItem.columnId}`);
+        
+        // Add image to the specific cell
+        await smartsheetAPIService.addImageToCell(
+          smartsheetTokens,
+          sheetId,
+          insertedRow.id,
+          imageItem.columnId,
+          imageData.buffer,
+          imageData.filename,
+          imageData.mimeType
+        );
+
+        console.log(`✅ Image successfully added to cell`);
+      } catch (error: any) {
+        console.log(`❌ Failed to process image: ${error.message}`);
+        // Continue with other images even if one fails
+      }
     }
   }
 

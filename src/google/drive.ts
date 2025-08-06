@@ -12,7 +12,13 @@ export class GoogleDriveService {
   ): Promise<{ buffer: Buffer; mimeType: string; filename: string }> {
     try {
       if (driveFileId) {
-        return await this.downloadDriveFile(encryptedTokens, driveFileId);
+        try {
+          return await this.downloadDriveFile(encryptedTokens, driveFileId);
+        } catch (driveError: any) {
+          // Fallback to public URL if Drive API fails
+          const publicUrl = `https://drive.google.com/uc?export=download&id=${driveFileId}`;
+          return await this.downloadDirectUrl(publicUrl);
+        }
       } else {
         return await this.downloadDirectUrl(imageUrl);
       }
@@ -75,7 +81,10 @@ export class GoogleDriveService {
     imageUrl: string
   ): Promise<{ buffer: Buffer; mimeType: string; filename: string }> {
     try {
-      const response = await axios.get(imageUrl, {
+      // Fix malformed Google Drive URLs
+      const fixedUrl = imageUrl.replace('export=&id=', 'export=download&id=');
+      
+      const response = await axios.get(fixedUrl, {
         responseType: 'arraybuffer',
         timeout: 30000, // 30 seconds timeout
         maxContentLength: 10 * 1024 * 1024, // 10MB limit
