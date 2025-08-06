@@ -24,15 +24,26 @@ function Layout() {
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Sidebar */}
-      <div className="fixed inset-y-0 left-0 z-50 w-64 bg-white shadow-lg">
-        <div className="flex h-16 items-center justify-center border-b border-gray-200">
-          <h1 className="text-xl font-bold text-gray-900">
-            Google → Smartsheet
-          </h1>
+      <div className="fixed inset-y-0 left-0 z-50 w-72 bg-white border-r border-gray-100">
+        {/* Header */}
+        <div className="flex h-20 items-center justify-center">
+          <div className="flex items-center space-x-3">
+            <div className="bg-gradient-to-r from-green-500 to-blue-500 p-2 rounded-lg">
+              <svg className="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M14,2H6A2,2 0 0,0 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2M18,20H6V4H13V9H18V20Z"/>
+              </svg>
+            </div>
+            <div>
+              <h1 className="text-lg font-semibold text-gray-900">
+                Google → Smartsheet
+              </h1>
+            </div>
+          </div>
         </div>
 
-        <nav className="mt-8 px-4">
-          <ul className="space-y-2">
+        {/* Navigation */}
+        <nav className="px-6 mt-8">
+          <ul className="space-y-1">
             {navigation.map((item) => {
               const isActive = location.pathname === item.href ||
                 (item.href === '/transfer' && location.pathname.startsWith('/transfer'));
@@ -42,16 +53,16 @@ function Layout() {
                   <Link
                     to={item.href}
                     className={clsx(
-                      'group flex items-center px-3 py-2 text-sm font-medium rounded-md transition-colors',
+                      'group flex items-center px-4 py-3 text-sm font-medium rounded-xl transition-all duration-200',
                       isActive
-                        ? 'bg-primary-50 text-primary-700 border-r-2 border-primary-500'
-                        : 'text-gray-700 hover:bg-gray-50 hover:text-gray-900'
+                        ? 'bg-gradient-to-r from-blue-50 to-purple-50 text-blue-700 shadow-sm'
+                        : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
                     )}
                   >
                     <item.icon
                       className={clsx(
                         'mr-3 h-5 w-5',
-                        isActive ? 'text-primary-500' : 'text-gray-400 group-hover:text-gray-500'
+                        isActive ? 'text-blue-600' : 'text-gray-400 group-hover:text-gray-600'
                       )}
                     />
                     {item.name}
@@ -63,12 +74,16 @@ function Layout() {
         </nav>
 
         {/* User info */}
-        <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-gray-200">
-          <div className="flex items-center">
+        <div className="absolute bottom-0 left-0 right-0 p-6 border-t border-gray-100">
+          <div className="flex items-center mb-4">
             <div className="flex-shrink-0">
-              <UserIcon className="h-8 w-8 text-gray-400" />
+              <div className="w-10 h-10 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full flex items-center justify-center">
+                <span className="text-white font-semibold text-sm">
+                  {user?.name?.charAt(0)?.toUpperCase()}
+                </span>
+              </div>
             </div>
-            <div className="ml-3 flex-1">
+            <div className="ml-3 flex-1 min-w-0">
               <p className="text-sm font-medium text-gray-900 truncate">
                 {user?.name}
               </p>
@@ -78,36 +93,36 @@ function Layout() {
             </div>
             <button
               onClick={logout}
-              className="ml-3 p-1 text-gray-400 hover:text-gray-500"
+              className="ml-3 p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
               title="Logout"
             >
-              <ArrowRightOnRectangleIcon className="h-5 w-5" />
+              <ArrowRightOnRectangleIcon className="h-4 w-4" />
             </button>
           </div>
 
           {/* Connection status */}
-          <div className="mt-3 flex space-x-2">
+          <div className="flex space-x-2">
             <div className={clsx(
-              'flex items-center px-2 py-1 text-xs rounded-md',
+              'flex items-center px-3 py-1.5 text-xs rounded-full border',
               user?.googleConnected
-                ? 'bg-success-50 text-success-700'
-                : 'bg-gray-100 text-gray-500'
+                ? 'bg-green-50 text-green-700 border-green-200'
+                : 'bg-gray-50 text-gray-500 border-gray-200'
             )}>
               <div className={clsx(
-                'w-2 h-2 rounded-full mr-1',
-                user?.googleConnected ? 'bg-success-500' : 'bg-gray-400'
+                'w-2 h-2 rounded-full mr-2',
+                user?.googleConnected ? 'bg-green-500' : 'bg-gray-400'
               )} />
               Google
             </div>
             <div className={clsx(
-              'flex items-center px-2 py-1 text-xs rounded-md',
+              'flex items-center px-3 py-1.5 text-xs rounded-full border',
               user?.smartsheetConnected
-                ? 'bg-success-50 text-success-700'
-                : 'bg-gray-100 text-gray-500'
+                ? 'bg-blue-50 text-blue-700 border-blue-200'
+                : 'bg-gray-50 text-gray-500 border-gray-200'
             )}>
               <div className={clsx(
-                'w-2 h-2 rounded-full mr-1',
-                user?.smartsheetConnected ? 'bg-success-500' : 'bg-gray-400'
+                'w-2 h-2 rounded-full mr-2',
+                user?.smartsheetConnected ? 'bg-blue-500' : 'bg-gray-400'
               )} />
               Smartsheet
             </div>
@@ -116,7 +131,7 @@ function Layout() {
       </div>
 
       {/* Main content */}
-      <div className="pl-64">
+      <div className="pl-72">
         <main className="py-8">
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
             <Outlet />

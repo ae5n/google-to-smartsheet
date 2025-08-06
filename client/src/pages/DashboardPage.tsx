@@ -128,112 +128,49 @@ function DashboardPage() {
 
   return (
     <div className="max-w-6xl mx-auto">
-      <div className="md:flex md:items-center md:justify-between mb-8">
-        <div className="flex-1 min-w-0">
-          <h1 className="text-2xl font-bold leading-7 text-gray-900 sm:text-3xl sm:truncate">
-            Dashboard
+      {/* Hero Section */}
+      <div className="text-center py-12 mb-12">
+        <div className="mb-8">
+          <div className="flex justify-center items-center mb-6">
+            <div className="bg-green-100 p-3 rounded-full mr-4">
+              <svg className="w-8 h-8 text-green-600" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M7 7H17C18.1046 7 19 7.89543 19 9V15C19 16.1046 18.1046 17 17 17H7C5.89543 17 5 16.1046 5 15V9C5 7.89543 5.89543 7 7 7Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M8 11L12 11" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                <path d="M8 13L16 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+              </svg>
+            </div>
+            <div className="flex items-center text-gray-400 text-2xl">
+              <span>→</span>
+            </div>
+            <div className="bg-blue-100 p-3 rounded-full ml-4">
+              <svg className="w-8 h-8 text-blue-600" fill="currentColor" viewBox="0 0 24 24">
+                <rect width="20" height="16" x="2" y="4" rx="2" ry="2" stroke="currentColor" strokeWidth="2" fill="none"/>
+                <rect width="4" height="2" x="4" y="7" fill="currentColor"/>
+                <rect width="4" height="2" x="10" y="7" fill="currentColor"/>
+                <rect width="4" height="2" x="16" y="7" fill="currentColor"/>
+                <rect width="4" height="2" x="4" y="11" fill="currentColor"/>
+                <rect width="4" height="2" x="10" y="11" fill="currentColor"/>
+                <rect width="4" height="2" x="16" y="11" fill="currentColor"/>
+                <rect width="4" height="2" x="4" y="15" fill="currentColor"/>
+                <rect width="4" height="2" x="10" y="15" fill="currentColor"/>
+                <rect width="4" height="2" x="16" y="15" fill="currentColor"/>
+              </svg>
+            </div>
+          </div>
+          <h1 className="text-3xl font-bold text-gray-900 mb-8">
+            Transfer Google Sheet to Smartsheet
           </h1>
-          <p className="mt-1 text-sm text-gray-500">
-            Welcome back, {user?.name}. Ready to transfer some data?
-          </p>
         </div>
-        <div className="mt-4 flex md:mt-0 md:ml-4">
-          <Link
-            to="/transfer"
-            className="ml-3 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
-          >
-            <PlusIcon className="-ml-1 mr-2 h-5 w-5" />
-            New Transfer
-          </Link>
-        </div>
+        
+        <Link
+          to="/transfer"
+          className="inline-flex items-center px-8 py-4 border border-transparent rounded-lg shadow-lg text-lg font-semibold text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transform hover:scale-105 transition-all duration-200"
+        >
+          <PlusIcon className="-ml-1 mr-3 h-6 w-6" />
+          Start New Transfer
+        </Link>
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4 mb-8">
-        <div className="bg-white overflow-hidden shadow rounded-lg">
-          <div className="p-5">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <CheckCircleIcon className="h-6 w-6 text-green-400" />
-              </div>
-              <div className="ml-5 w-0 flex-1">
-                <dl>
-                  <dt className="text-sm font-medium text-gray-500 truncate">
-                    Completed Transfers
-                  </dt>
-                  <dd className="text-lg font-medium text-gray-900">
-                    {recentJobs.filter(job => job.status === 'completed').length}
-                  </dd>
-                </dl>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white overflow-hidden shadow rounded-lg">
-          <div className="p-5">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <ClockIcon className="h-6 w-6 text-yellow-400" />
-              </div>
-              <div className="ml-5 w-0 flex-1">
-                <dl>
-                  <dt className="text-sm font-medium text-gray-500 truncate">
-                    Total Transfers
-                  </dt>
-                  <dd className="text-lg font-medium text-gray-900">
-                    {recentJobs.length}
-                  </dd>
-                </dl>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white overflow-hidden shadow rounded-lg">
-          <div className="p-5">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <svg className="h-6 w-6 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                </svg>
-              </div>
-              <div className="ml-5 w-0 flex-1">
-                <dl>
-                  <dt className="text-sm font-medium text-gray-500 truncate">
-                    Total Rows Transferred
-                  </dt>
-                  <dd className="text-lg font-medium text-gray-900">
-                    {recentJobs.reduce((total, job) => total + (job.progress.processedRows || 0), 0).toLocaleString()}
-                  </dd>
-                </dl>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white overflow-hidden shadow rounded-lg">
-          <div className="p-5">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <svg className="h-6 w-6 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                </svg>
-              </div>
-              <div className="ml-5 w-0 flex-1">
-                <dl>
-                  <dt className="text-sm font-medium text-gray-500 truncate">
-                    Images Transferred
-                  </dt>
-                  <dd className="text-lg font-medium text-gray-900">
-                    {recentJobs.reduce((total, job) => total + (job.progress.processedImages || 0), 0).toLocaleString()}
-                  </dd>
-                </dl>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
 
       {/* Recent transfers */}
       <div className="bg-white shadow rounded-lg">
