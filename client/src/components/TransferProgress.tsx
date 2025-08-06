@@ -255,12 +255,37 @@ function TransferProgress({ jobId }: TransferProgressProps) {
                   {job.progress.processedImages || 0} / {job.progress.totalImages || 0} ({imageProgressPercentage}%)
                 </span>
               </div>
-              <div className="w-full bg-gray-200 rounded-full h-3">
+              <div className="w-full bg-gray-200 rounded-full h-3 relative overflow-hidden">
+                {/* Successful images - green */}
                 <div 
-                  className="bg-green-600 h-3 rounded-full transition-all duration-300"
-                  style={{ width: `${imageProgressPercentage}%` }}
+                  className="bg-green-600 h-3 absolute left-0 transition-all duration-300"
+                  style={{ 
+                    width: `${job.progress.totalImages > 0 ? (job.progress.successfulImages || 0) / job.progress.totalImages * 100 : 0}%` 
+                  }}
+                ></div>
+                {/* Fallback images - orange */}
+                <div 
+                  className="bg-orange-500 h-3 absolute transition-all duration-300"
+                  style={{ 
+                    left: `${job.progress.totalImages > 0 ? (job.progress.successfulImages || 0) / job.progress.totalImages * 100 : 0}%`,
+                    width: `${job.progress.totalImages > 0 ? (job.progress.fallbackImages || 0) / job.progress.totalImages * 100 : 0}%` 
+                  }}
                 ></div>
               </div>
+              {/* Image processing breakdown */}
+              {job.status === 'completed' && (job.progress.successfulImages || job.progress.fallbackImages || job.progress.failedImages) && (
+                <div className="flex gap-4 mt-1 text-xs">
+                  {(job.progress.successfulImages || 0) > 0 && (
+                    <span className="text-green-600">✅ {job.progress.successfulImages} as images</span>
+                  )}
+                  {(job.progress.fallbackImages || 0) > 0 && (
+                    <span className="text-orange-600">🔗 {job.progress.fallbackImages} as links</span>
+                  )}
+                  {(job.progress.failedImages || 0) > 0 && (
+                    <span className="text-red-600">❌ {job.progress.failedImages} failed</span>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -315,13 +340,20 @@ function TransferProgress({ jobId }: TransferProgressProps) {
                   <span className="text-2xl">🖼️</span>
                 </div>
                 <p className="text-xl font-bold text-purple-900">
-                  {job.progress.processedImages || 0}
+                  {job.progress.successfulImages || 0}
+                  {job.progress.fallbackImages && job.progress.fallbackImages > 0 && (
+                    <span className="text-sm text-orange-600 ml-1">
+                      +{job.progress.fallbackImages} links
+                    </span>
+                  )}
                 </p>
                 <p className="text-xs text-purple-700">
-                  {job.progress.totalImages > 0 
-                    ? `${Math.round((job.progress.processedImages / job.progress.totalImages) * 100)}% success`
-                    : 'processed'
-                  }
+                  of {job.progress.totalImages || 0} total
+                  {(job.progress.failedImages || 0) > 0 && (
+                    <span className="text-red-600">
+                      , {job.progress.failedImages} failed
+                    </span>
+                  )}
                 </p>
               </div>
             )}
@@ -382,7 +414,13 @@ function TransferProgress({ jobId }: TransferProgressProps) {
                   <strong>Rows Transferred:</strong> {job.progress?.processedRows || 0}
                 </p>
                 <p className="text-gray-600">
-                  <strong>Images Processed:</strong> {job.progress?.processedImages || 0}
+                  <strong>Images:</strong> {job.progress?.successfulImages || 0} uploaded
+                  {(job.progress?.fallbackImages || 0) > 0 && (
+                    <>, {job.progress.fallbackImages} as links</>
+                  )}
+                  {(job.progress?.failedImages || 0) > 0 && (
+                    <>, {job.progress.failedImages} failed</>
+                  )}
                 </p>
               </div>
             </div>

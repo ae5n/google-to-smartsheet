@@ -77,6 +77,9 @@ export interface TransferProgress {
   processedRows: number;
   totalImages: number;
   processedImages: number;
+  successfulImages?: number;
+  fallbackImages?: number;
+  failedImages?: number;
   currentBatch?: number;
   totalBatches?: number;
   errors: TransferError[];

@@ -302,6 +302,9 @@ export class TransferService {
     let processedRows = 0;
     let totalImages = 0;
     let processedImages = 0;
+    let successfulImages = 0;
+    let fallbackImages = 0;
+    let failedImages = 0;
 
     // Count total rows and images first
     for (const [tabName, tabData] of Object.entries(googleData)) {
@@ -334,6 +337,9 @@ export class TransferService {
       processedRows,
       totalImages,
       processedImages,
+      successfulImages,
+      fallbackImages,
+      failedImages,
       errors,
       warnings: []
     });
@@ -411,13 +417,36 @@ export class TransferService {
             
             // Process images for successfully inserted rows
             if (imageQueue.length > 0 && result.success > 0) {
-              await this.processImageQueue(
+              const imageResults = await this.processImageQueue(
                 imageQueue, 
                 result, 
                 job.smartsheetId,
                 googleTokens,
                 smartsheetTokens
               );
+              
+              // Update image statistics
+              successfulImages += imageResults.successful;
+              fallbackImages += imageResults.fallbacks;
+              failedImages += imageResults.failed;
+              
+              // Log image processing results
+              if (imageResults.successful > 0 || imageResults.fallbacks > 0 || imageResults.failed > 0) {
+                await this.addJobLog(job.id, 'info', `Image processing completed`, '🖼️', {
+                  successful: imageResults.successful,
+                  fallbacks: imageResults.fallbacks,
+                  failed: imageResults.failed,
+                  total: imageQueue.length
+                });
+                
+                // Add warning if there were fallbacks or failures
+                if (imageResults.fallbacks > 0) {
+                  await this.addJobLog(job.id, 'warn', `${imageResults.fallbacks} images converted to links (download failed)`, '⚠️');
+                }
+                if (imageResults.failed > 0) {
+                  await this.addJobLog(job.id, 'error', `${imageResults.failed} images could not be processed`, '❌');
+                }
+              }
             }
             
             errors.push(...result.errors.map(e => ({
@@ -445,6 +474,9 @@ export class TransferService {
           processedRows,
           totalImages,
           processedImages,
+          successfulImages,
+          fallbackImages,
+          failedImages,
           currentBatch: Math.floor(i / batchSize) + 1,
           totalBatches: Math.ceil(dataRows.length / batchSize),
           errors,
@@ -601,9 +633,13 @@ export class TransferService {
     sheetId: number,
     googleTokens: EncryptedTokens,
     smartsheetTokens: EncryptedTokens
-  ): Promise<void> {
+  ): Promise<{ successful: number; failed: number; fallbacks: number }> {
     // Get the actual row IDs from the insert result - try different possible structures
     const insertedRows = insertResult.result || insertResult.data || insertResult || [];
+    
+    let successful = 0;
+    let failed = 0;
+    let fallbacks = 0;
     
     // Log image processing concisely
     if (imageQueue.length > 0) {
@@ -614,11 +650,12 @@ export class TransferService {
       // Find the corresponding inserted row first (outside try block)
       const insertedRow = insertedRows[imageItem.rowIndex];
       if (!insertedRow || !insertedRow.id) {
-        continue; // Skip silently - row structure issues are rare
+        failed++;
+        continue; // Skip - row structure issues
       }
 
       try {
-        // Download and add image (minimal logging)
+        // Download and add image
         const imageData = await googleDriveService.downloadImage(
           googleTokens,
           imageItem.imageUrl,
@@ -634,8 +671,10 @@ export class TransferService {
           imageData.filename,
           imageData.mimeType
         );
+        
+        successful++;
       } catch (error: any) {
-        // Fallback: update cell with URL hyperlink (log only failures)
+        // Fallback: update cell with URL hyperlink
         console.log(`⚠️ Image fallback: ${imageItem.imageUrl}`);
         try {
           await smartsheetAPIService.updateCellWithUrl(
@@ -645,11 +684,15 @@ export class TransferService {
             imageItem.columnId,
             imageItem.imageUrl
           );
+          fallbacks++;
         } catch (fallbackError: any) {
           console.log(`❌ Image processing failed: ${fallbackError.message}`);
+          failed++;
         }
       }
     }
+    
+    return { successful, failed, fallbacks };
   }
 
   public async getDryRunResult(jobId: string): Promise<DryRunResult | null> {
