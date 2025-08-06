@@ -86,6 +86,45 @@ router.get('/workspaces/:workspaceId/folders', async (req: Request, res: Respons
   }
 });
 
+router.get('/folders/:folderId/sheets', async (req: Request, res: Response) => {
+  try {
+    const folderId = parseInt(req.params.folderId);
+    
+    if (isNaN(folderId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid folder ID'
+      } as APIResponse);
+    }
+
+    const user = await database.getUserById(req.session.user!.id);
+    
+    if (!user?.smartsheetTokens) {
+      return res.status(400).json({
+        success: false,
+        error: 'Smartsheet account not connected'
+      } as APIResponse);
+    }
+
+    const validTokens = await smartsheetAuthService.validateAndRefreshTokens(
+      user.id,
+      user.smartsheetTokens
+    );
+
+    const sheets = await smartsheetAPIService.getFolderSheets(validTokens, folderId);
+
+    res.json({
+      success: true,
+      data: sheets
+    } as APIResponse);
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    } as APIResponse);
+  }
+});
+
 router.post('/workspaces/:workspaceId/folders', [
   body('name').notEmpty().isLength({ min: 1, max: 100 }).withMessage('Folder name is required and must be 1-100 characters')
 ], async (req: Request, res: Response) => {

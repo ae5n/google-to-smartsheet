@@ -16,7 +16,7 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
   // Google Sheets data
   const [googleSheets, setGoogleSheets] = useState<GoogleSheet[]>([]);
   const [selectedSpreadsheet, setSelectedSpreadsheet] = useState<GoogleSheet | null>(null);
-  const [selectedTabs, setSelectedTabs] = useState<string[]>([]);
+  const [selectedTab, setSelectedTab] = useState<string>('');
 
   // Smartsheet data  
   const [workspaces, setWorkspaces] = useState<SmartsheetWorkspace[]>([]);
@@ -45,6 +45,13 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
   const [columnMappings, setColumnMappings] = useState<ColumnMapping[]>([]);
   const [googleHeaders, setGoogleHeaders] = useState<string[]>([]);
 
+  // Row statistics
+  const [rowStats, setRowStats] = useState<{
+    totalRows: number;
+    dataRows: number;
+    headerRows: number;
+  } | null>(null);
+
   // Execution state
   const [isExecuting, setIsExecuting] = useState(false);
   const [executionStep, setExecutionStep] = useState('');
@@ -53,16 +60,25 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
   useEffect(() => {
     loadGoogleSheets();
     loadWorkspaces();
-    if (targetOption === 'existing') {
-      loadExistingSheets();
-    }
-  }, [targetOption]);
+  }, []);
 
   useEffect(() => {
     if (selectedWorkspace) {
       loadWorkspaceFolders(selectedWorkspace.id);
     }
   }, [selectedWorkspace]);
+
+  useEffect(() => {
+    if (targetOption === 'existing' && selectedFolder) {
+      loadExistingSheets(selectedFolder.id);
+    }
+  }, [selectedFolder, targetOption]);
+
+  useEffect(() => {
+    if (currentStep === 'preview') {
+      loadRowStatistics();
+    }
+  }, [currentStep, selectedSpreadsheet, selectedTab, selectedHeaderRow]);
 
   const loadGoogleSheets = async () => {
     try {
@@ -109,9 +125,11 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
     }
   };
 
-  const loadExistingSheets = async () => {
+  const loadExistingSheets = async (folderId?: number) => {
     try {
-      const response = await smartsheetAPI.getSheets();
+      const response = folderId 
+        ? await smartsheetAPI.getFolderSheets(folderId)
+        : await smartsheetAPI.getSheets();
       if (response.data.success) {
         setExistingSheets(response.data.data || []);
       } else {
@@ -151,11 +169,11 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
   };
 
   const loadHeaderPreview = async () => {
-    if (!selectedSpreadsheet || selectedTabs.length === 0) return;
+    if (!selectedSpreadsheet || !selectedTab) return;
 
     try {
       setLoading(true);
-      const response = await googleAPI.getHeaderPreview(selectedSpreadsheet.spreadsheetId, selectedTabs[0]);
+      const response = await googleAPI.getHeaderPreview(selectedSpreadsheet.spreadsheetId, selectedTab);
       if (response.data.success && response.data.data) {
         const preview = response.data.data;
         setHeaderPreview(preview);
@@ -177,11 +195,11 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
   };
 
   const loadGoogleHeaders = async () => {
-    if (!selectedSpreadsheet || selectedTabs.length === 0) return;
+    if (!selectedSpreadsheet || !selectedTab) return;
 
     try {
       setLoading(true);
-      const response = await googleAPI.getSpreadsheetHeaders(selectedSpreadsheet.spreadsheetId, selectedTabs[0]);
+      const response = await googleAPI.getSpreadsheetHeaders(selectedSpreadsheet.spreadsheetId, selectedTab);
       if (response.data.success) {
         const headers = response.data.data || [];
         setGoogleHeaders(headers);
@@ -197,17 +215,48 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
     }
   };
 
+  const loadRowStatistics = async () => {
+    if (!selectedSpreadsheet || !selectedTab || selectedHeaderRow < 0) return;
+
+    try {
+      // Get the actual data that will be transferred (same as backend uses)
+      const response = await googleAPI.previewSpreadsheet(selectedSpreadsheet.spreadsheetId, [selectedTab]);
+      
+      if (response.data.success && response.data.data) {
+        const previewData = response.data.data.preview;
+        const tabData = previewData ? previewData[selectedTab] : null;
+        
+        if (tabData && Array.isArray(tabData)) {
+          const actualRows = tabData.length; // This is what Google Sheets API returns (excludes empty rows)
+          const headerRows = selectedHeaderRow + 1;
+          const dataRowsToTransfer = Math.max(0, actualRows - headerRows);
+          
+          const stats = {
+            totalRows: actualRows, // Total rows with data (matches backend behavior)
+            dataRows: dataRowsToTransfer, // Data rows that will be transferred
+            headerRows
+          };
+          
+          console.log('Setting row stats (matches backend):', stats);
+          setRowStats(stats);
+        }
+      }
+    } catch (error) {
+      console.error('Error loading row statistics:', error);
+    }
+  };
+
   const canProceedFromStep = (step: WizardStep): boolean => {
     switch (step) {
       case 'google-selection':
-        return selectedSpreadsheet !== null && selectedTabs.length > 0;
+        return selectedSpreadsheet !== null && selectedTab !== '';
       case 'header-selection':
         return headerPreview !== null && selectedHeaderRow >= 0 && selectedColumns.length > 0;
       case 'smartsheet-target':
         if (targetOption === 'new') {
           return newSheetName.trim() !== '' && selectedWorkspace !== null;
         } else {
-          return selectedExistingSheet !== null;
+          return selectedExistingSheet !== null && selectedWorkspace !== null && selectedFolder !== null;
         }
       case 'preview':
         return true;
@@ -231,8 +280,19 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
       setGoogleHeaders(filteredHeaders);
     }
     
+    if (currentStep === 'smartsheet-target' && canProceedFromStep(currentStep)) {
+      // Load row statistics for the preview
+      await loadRowStatistics();
+    }
+    
     if (currentIndex < steps.length - 1) {
-      setCurrentStep(steps[currentIndex + 1]);
+      const nextStep = steps[currentIndex + 1];
+      setCurrentStep(nextStep);
+      
+      // Auto-start execution when moving to execution step
+      if (nextStep === 'execution') {
+        setTimeout(executeTransfer, 500);
+      }
     }
   };
 
@@ -287,7 +347,7 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
   };
 
   const executeTransfer = async () => {
-    if (!selectedSpreadsheet || selectedTabs.length === 0) {
+    if (!selectedSpreadsheet || !selectedTab) {
       toast.error('Missing Google Sheet selection');
       return;
     }
@@ -452,7 +512,7 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
         selectedColumns: number[];
       } = {
         googleSpreadsheetId: selectedSpreadsheet.spreadsheetId,
-        googleSheetTabs: selectedTabs,
+        googleSheetTabs: [selectedTab],
         smartsheetId: targetSheet.id,
         columnMappings: mappingsToUse,
         dryRun: false,
@@ -679,7 +739,10 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
                     ? 'border-blue-500 bg-blue-50'
                     : 'border-gray-200'
                 }`}
-                onClick={() => setSelectedSpreadsheet(sheet)}
+                onClick={() => {
+                  setSelectedSpreadsheet(sheet);
+                  setSelectedTab(''); // Reset tab selection when spreadsheet changes
+                }}
               >
                 <div className="font-medium">{sheet.title}</div>
                 <div className="text-sm text-gray-500">{sheet.sheets.length} tabs</div>
@@ -691,21 +754,17 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
 
       {selectedSpreadsheet && (
         <div>
-          <h4 className="font-medium text-gray-900 mb-2">Select Tabs to Transfer</h4>
+          <h4 className="font-medium text-gray-900 mb-2">Select Tab to Transfer</h4>
           <div className="space-y-2 max-h-40 overflow-y-auto">
             {selectedSpreadsheet.sheets.map((tab) => (
-              <label key={tab.sheetId} className="flex items-center space-x-2">
+              <label key={tab.sheetId} className="flex items-center space-x-2 cursor-pointer">
                 <input
-                  type="checkbox"
-                  checked={selectedTabs.includes(tab.title)}
-                  onChange={(e) => {
-                    if (e.target.checked) {
-                      setSelectedTabs([...selectedTabs, tab.title]);
-                    } else {
-                      setSelectedTabs(selectedTabs.filter(t => t !== tab.title));
-                    }
-                  }}
-                  className="rounded border-gray-300"
+                  type="radio"
+                  name="selectedTab"
+                  value={tab.title}
+                  checked={selectedTab === tab.title}
+                  onChange={(e) => setSelectedTab(e.target.value)}
+                  className="text-primary-600 focus:ring-primary-500 border-gray-300"
                 />
                 <span className="text-sm">{tab.title}</span>
                 <span className="text-xs text-gray-500">
@@ -737,6 +796,11 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
               />
               <span>Create new sheet</span>
             </label>
+            {targetOption === 'new' && (
+              <div className="mt-2 p-2 bg-green-50 border border-green-200 rounded text-xs text-green-800">
+                Creates fresh sheet with selected columns as headers
+              </div>
+            )}
           </div>
 
           <div>
@@ -751,6 +815,11 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
               />
               <span>Use existing sheet</span>
             </label>
+            {targetOption === 'existing' && (
+              <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-800">
+                Appends data to bottom of existing sheet (headers skipped)
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -848,25 +917,79 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
       )}
 
       {targetOption === 'existing' && (
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Select Existing Sheet
-          </label>
-          <select
-            value={selectedExistingSheet?.id || ''}
-            onChange={(e) => {
-              const sheet = existingSheets.find(s => s.id === parseInt(e.target.value));
-              setSelectedExistingSheet(sheet || null);
-            }}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="">Select sheet</option>
-            {existingSheets.map((sheet) => (
-              <option key={sheet.id} value={sheet.id}>
-                {sheet.name}
-              </option>
-            ))}
-          </select>
+        <div className="space-y-4">
+          {/* Workspace Selection */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Select Workspace
+            </label>
+            <select
+              value={selectedWorkspace?.id || ''}
+              onChange={(e) => {
+                const workspace = workspaces.find(w => w.id === parseInt(e.target.value));
+                setSelectedWorkspace(workspace || null);
+                setSelectedFolder(null); // Reset folder when workspace changes
+                setSelectedExistingSheet(null); // Reset sheet when workspace changes
+              }}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">Select workspace</option>
+              {workspaces.map((workspace) => (
+                <option key={workspace.id} value={workspace.id}>
+                  {workspace.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Folder Selection */}
+          {selectedWorkspace && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Select Folder
+              </label>
+              <select
+                value={selectedFolder?.id || ''}
+                onChange={(e) => {
+                  const folder = folders.find(f => f.id === parseInt(e.target.value));
+                  setSelectedFolder(folder || null);
+                  setSelectedExistingSheet(null); // Reset sheet when folder changes
+                }}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">Select folder</option>
+                {folders.map((folder) => (
+                  <option key={folder.id} value={folder.id}>
+                    {folder.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Sheet Selection */}
+          {selectedFolder && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Select Existing Sheet
+              </label>
+              <select
+                value={selectedExistingSheet?.id || ''}
+                onChange={(e) => {
+                  const sheet = existingSheets.find(s => s.id === parseInt(e.target.value));
+                  setSelectedExistingSheet(sheet || null);
+                }}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">Select sheet</option>
+                {existingSheets.map((sheet) => (
+                  <option key={sheet.id} value={sheet.id}>
+                    {sheet.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -883,7 +1006,7 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
             <span className="font-medium">Source:</span> {selectedSpreadsheet?.title}
           </div>
           <div>
-            <span className="font-medium">Tabs:</span> {selectedTabs.join(', ')}
+            <span className="font-medium">Tab:</span> {selectedTab}
           </div>
           <div>
             <span className="font-medium">Header Row:</span> Row {selectedHeaderRow + 1}
@@ -898,6 +1021,32 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
               : ` Existing sheet "${selectedExistingSheet?.name}"`
             }
           </div>
+        </div>
+
+        {/* Row Statistics */}
+        <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+          <h4 className="font-medium text-green-900 mb-2">📊 Data to Transfer:</h4>
+          {rowStats ? (
+            <>
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <span className="text-green-700 font-medium">Rows with Data:</span> {rowStats.totalRows.toLocaleString()}
+                </div>
+                <div>
+                  <span className="text-green-700 font-medium">Will Transfer:</span> {rowStats.dataRows.toLocaleString()} rows
+                </div>
+              </div>
+              {rowStats.headerRows > 0 && (
+                <div className="mt-2 text-xs text-green-600">
+                  {rowStats.headerRows.toLocaleString()} header row(s) will be {targetOption === 'new' ? 'used as column headers' : 'skipped'}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="text-sm text-green-700">
+              Loading transfer statistics...
+            </div>
+          )}
         </div>
 
         {/* Show selected columns preview */}
@@ -918,21 +1067,6 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
             </div>
           </div>
         )}
-
-        <div className="mt-4">
-          <button
-            type="button"
-            onClick={() => {
-              setCurrentStep('execution');
-              // Start execution immediately when moving to execution step
-              setTimeout(executeTransfer, 500);
-            }}
-            className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
-            disabled={loading}
-          >
-            Start Transfer
-          </button>
-        </div>
       </div>
     </div>
   );

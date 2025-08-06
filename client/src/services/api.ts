@@ -103,6 +103,9 @@ export const smartsheetAPI = {
   getSheets: (): Promise<AxiosResponse<APIResponse<SmartsheetSheet[]>>> =>
     api.get('/api/smartsheet/sheets'),
 
+  getFolderSheets: (folderId: number): Promise<AxiosResponse<APIResponse<SmartsheetSheet[]>>> =>
+    api.get(`/api/smartsheet/folders/${folderId}/sheets`),
+
   getSheetDetails: (sheetId: number): Promise<AxiosResponse<APIResponse<SmartsheetSheet>>> =>
     api.get(`/api/smartsheet/sheets/${sheetId}`),
 

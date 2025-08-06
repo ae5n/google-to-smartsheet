@@ -86,6 +86,28 @@ export class SmartsheetAPIService {
     }
   }
 
+  public async getFolderSheets(encryptedTokens: EncryptedTokens, folderId: number): Promise<SmartsheetSheet[]> {
+    try {
+      const response = await smartsheetAuthService.makeAuthenticatedRequest(
+        encryptedTokens,
+        'GET',
+        `/folders/${folderId}`
+      );
+
+      this.logApiResponse(`/folders/${folderId}`, 'GET', response);
+
+      return (response.sheets || []).map((sheet: any) => ({
+        id: sheet.id,
+        name: sheet.name,
+        columns: [],
+        permalink: sheet.permalink
+      }));
+    } catch (error: any) {
+      this.logApiResponse(`/folders/${folderId}`, 'GET', null, error);
+      throw new Error(`Failed to fetch folder sheets: ${error.message}`);
+    }
+  }
+
   public async createFolderInWorkspace(
     encryptedTokens: EncryptedTokens,
     workspaceId: number,
