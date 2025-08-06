@@ -290,8 +290,10 @@ export class TransferService {
           ...mapping,
           smartsheetColumnId: actualColumn.id
         };
+      } else {
+        console.error(`❌ Column mapping failed: Trying to map to column ${index + 1} but existing sheet "${actualSheet.name}" only has ${actualSheet.columns.length} columns`);
+        throw new Error(`Cannot map ${job.columnMappings.length} columns to existing sheet "${actualSheet.name}" which only has ${actualSheet.columns.length} columns. Please select fewer columns or use a different target sheet.`);
       }
-      return mapping;
     });
 
     // Use the fixed mappings for the rest of the transfer
