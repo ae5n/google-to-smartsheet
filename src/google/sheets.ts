@@ -326,10 +326,32 @@ export class GoogleSheetsService {
     try {
       const sheetsClient = await this.createSheetsClient(encryptedTokens);
       
-      // Get first 10 rows for header selection
+      // Get sheet metadata to determine actual column count
+      const metadataResponse = await sheetsClient.spreadsheets.get({
+        spreadsheetId,
+        fields: 'sheets(properties(title,gridProperties(columnCount)))'
+      });
+      
+      const sheet = metadataResponse.data.sheets?.find(s => s.properties?.title === sheetTab);
+      const columnCount = sheet?.properties?.gridProperties?.columnCount || 26;
+      
+      // Convert column count to column letter (A, B, C, ... AA, AB, etc.)
+      const getColumnLetter = (num: number): string => {
+        let result = '';
+        while (num > 0) {
+          num--;
+          result = String.fromCharCode(65 + (num % 26)) + result;
+          num = Math.floor(num / 26);
+        }
+        return result;
+      };
+      
+      const lastColumn = getColumnLetter(columnCount);
+      
+      // Get first 10 rows for header selection using full column range
       const response = await sheetsClient.spreadsheets.values.get({
         spreadsheetId,
-        range: `'${sheetTab}'!1:10`,
+        range: `'${sheetTab}'!A1:${lastColumn}10`,
         valueRenderOption: 'FORMATTED_VALUE'
       });
 
@@ -348,7 +370,7 @@ export class GoogleSheetsService {
         
         rowOptions.push({
           rowIndex: i,
-          preview: processedHeaders.slice(0, 10), // Show first 10 columns
+          preview: processedHeaders.slice(0, Math.min(processedHeaders.length, 10)), // Show first 10 columns for preview
           score
         });
       }
@@ -357,9 +379,9 @@ export class GoogleSheetsService {
       rowOptions.sort((a, b) => b.score - a.score);
       
       return {
-        rows: rows.map(row => (row || []).slice(0, 15)), // Show first 15 columns for preview
+        rows: rows.map(row => (row || [])), // Show all available columns
         detectedHeaderRow: bestHeaderRow.rowIndex,
-        detectedHeaders: bestHeaderRow.headers.slice(0, 15),
+        detectedHeaders: bestHeaderRow.headers,
         rowOptions: rowOptions.slice(0, 5) // Show top 5 candidates
       };
     } catch (error: any) {
