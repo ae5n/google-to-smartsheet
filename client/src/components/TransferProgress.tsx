@@ -12,6 +12,8 @@ function TransferProgress({ jobId }: TransferProgressProps) {
   const [showActivityLog, setShowActivityLog] = useState(false);
 
   useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+    
     const fetchProgress = async () => {
       try {
         console.log('Fetching progress for job:', jobId);
@@ -31,9 +33,23 @@ function TransferProgress({ jobId }: TransferProgressProps) {
         const jobData = responseData.success ? responseData.data : responseData;
         console.log('Processed job data:', jobData);
         setJob(jobData);
+        
+        // Stop polling if job is completed, failed, or cancelled
+        if (jobData && ['completed', 'failed', 'cancelled'].includes(jobData.status)) {
+          console.log('Job finished, stopping polling');
+          if (interval) {
+            clearInterval(interval);
+            interval = null;
+          }
+        }
       } catch (err: any) {
         console.error('Fetch error:', err);
         setError(err.message);
+        // Stop polling on error
+        if (interval) {
+          clearInterval(interval);
+          interval = null;
+        }
       } finally {
         setLoading(false);
       }
@@ -41,9 +57,14 @@ function TransferProgress({ jobId }: TransferProgressProps) {
 
     fetchProgress();
     
-    // Poll for updates if job is running
-    const interval = setInterval(fetchProgress, 2000);
-    return () => clearInterval(interval);
+    // Poll for updates every 2 seconds
+    interval = setInterval(fetchProgress, 2000);
+    
+    return () => {
+      if (interval) {
+        clearInterval(interval);
+      }
+    };
   }, [jobId]);
 
   if (loading) {
