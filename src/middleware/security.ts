@@ -27,17 +27,15 @@ export const rateLimiter = rateLimit({
   message: 'Too many requests from this IP, please try again later',
   standardHeaders: true,
   legacyHeaders: false,
-  // Skip rate limiting in development to avoid trust proxy issues
-  skip: (req) => process.env.NODE_ENV === 'development',
-  // Fix for Render proxy configuration
-  trustProxy: process.env.NODE_ENV === 'production' ? 1 : false,
+  // Skip rate limiting in production to avoid proxy trust issues
+  skip: (req) => process.env.NODE_ENV === 'production',
 });
 
 export const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 10, // limit each IP to 10 auth requests per windowMs
-  // Skip rate limiting in development to avoid trust proxy issues
-  skip: (req) => process.env.NODE_ENV === 'development',
+  // Skip rate limiting in production to avoid proxy trust issues
+  skip: (req) => process.env.NODE_ENV === 'production',
   message: 'Too many authentication attempts, please try again later',
   standardHeaders: true,
   legacyHeaders: false,
