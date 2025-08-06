@@ -41,7 +41,8 @@ export class GoogleAuthService {
       this.redirectUri,
       this.scopes,
       state,
-      codeChallenge
+      codeChallenge,
+      false // Don't force consent - let Google decide based on user's previous authorization
     );
 
     return { url, state };

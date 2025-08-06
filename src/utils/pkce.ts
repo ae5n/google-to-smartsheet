@@ -18,7 +18,8 @@ export function createAuthorizationUrl(
   redirectUri: string,
   scopes: string[],
   state: string,
-  codeChallenge: string
+  codeChallenge: string,
+  forceConsent: boolean = false
 ): string {
   const params = new URLSearchParams({
     response_type: 'code',
@@ -28,9 +29,13 @@ export function createAuthorizationUrl(
     state: state,
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
-    access_type: 'offline',
-    prompt: 'consent'
+    access_type: 'offline'
   });
+
+  // Only force consent when explicitly requested (e.g., for new users or re-auth)
+  if (forceConsent) {
+    params.set('prompt', 'consent');
+  }
 
   return `${baseUrl}?${params.toString()}`;
 }

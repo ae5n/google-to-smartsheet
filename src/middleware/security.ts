@@ -33,7 +33,7 @@ export const rateLimiter = rateLimit({
 
 export const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // limit each IP to 10 auth requests per windowMs
+  max: 15, // limit each IP to 15 auth requests per windowMs
   message: 'Too many authentication attempts, please try again later',
   standardHeaders: true,
   legacyHeaders: false,
@@ -75,7 +75,9 @@ export const requireAuth = (req: Request, res: Response, next: NextFunction): vo
 export const validateContentType = (req: Request, res: Response, next: NextFunction): void => {
   if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
     const contentType = req.headers['content-type'];
-    if (!contentType || (!contentType.includes('application/json') && !contentType.includes('multipart/form-data'))) {
+    // Allow requests without body (empty POST requests) or with valid content types
+    if (contentType && !contentType.includes('application/json') && !contentType.includes('multipart/form-data') && !contentType.includes('application/x-www-form-urlencoded')) {
+      console.log('Content-Type validation failed:', contentType, 'for', req.method, req.path);
       res.status(400).json({ error: 'Invalid content type' });
       return;
     }

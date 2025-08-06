@@ -56,7 +56,7 @@ export const authAPI = {
     api.post('/auth/smartsheet/disconnect', {}),
 
   logout: (): Promise<AxiosResponse<APIResponse>> =>
-    api.post('/auth/logout'),
+    api.post('/auth/logout', {}),
 };
 
 // Google API
