@@ -29,6 +29,8 @@ export const rateLimiter = rateLimit({
   legacyHeaders: false,
   // Skip rate limiting in development to avoid trust proxy issues
   skip: (req) => process.env.NODE_ENV === 'development',
+  // Fix for Render proxy configuration
+  trustProxy: process.env.NODE_ENV === 'production' ? 1 : false,
 });
 
 export const authRateLimiter = rateLimit({

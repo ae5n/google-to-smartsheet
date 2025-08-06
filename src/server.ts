@@ -66,7 +66,7 @@ class Server {
         secure: config.server.nodeEnv === 'production',
         httpOnly: true,
         maxAge: config.session.maxAge,
-        sameSite: 'strict'
+        sameSite: 'lax' // Changed to 'lax' for OAuth redirects
       },
       name: 'gts.sid'
     }));
