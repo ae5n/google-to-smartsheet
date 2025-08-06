@@ -6,8 +6,8 @@ export class EncryptionService {
 
   constructor() {
     this.encryptionKey = config.database.encryptionKey;
-    if (this.encryptionKey === 'your-256-bit-encryption-key-here') {
-      throw new Error('Please set a proper ENCRYPTION_KEY in your environment variables');
+    if (!this.encryptionKey || this.encryptionKey.length < 32) {
+      throw new Error('ENCRYPTION_KEY environment variable must be set with a proper 256-bit key (minimum 32 characters)');
     }
   }
 
