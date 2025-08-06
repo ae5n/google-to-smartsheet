@@ -15,28 +15,11 @@ export class SmartsheetAPIService {
   private readonly baseUrl = 'https://api.smartsheet.com/2.0';
 
   private logApiResponse(endpoint: string, method: string, response: any, error?: any): void {
-    // Only log transfer-related operations and errors
-    const isTransferRelated = endpoint.includes('/sheets') && method === 'POST';
-    const hasError = !!error;
-    
-    if (!isTransferRelated && !hasError) {
-      return; // Skip logging for routine operations
+    // Only log errors, skip all verbose response logging
+    if (error) {
+      console.log(`❌ [Smartsheet API] ${method} ${endpoint}: ${error.message}`);
     }
-
-    const logEntry = {
-      timestamp: new Date().toISOString(),
-      endpoint,
-      method,
-      status: error ? 'error' : 'success',
-      statusCode: response?.status || error?.response?.status,
-      error: error ? {
-        message: error.message,
-        code: error.code,
-        response: error.response?.data
-      } : undefined
-    };
-
-    console.log(`[Smartsheet API] ${method} ${endpoint}:`, JSON.stringify(logEntry, null, 2));
+    // Skip success logging - too verbose
   }
 
   public async getUserSheets(encryptedTokens: EncryptedTokens): Promise<SmartsheetSheet[]> {

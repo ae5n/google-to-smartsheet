@@ -62,18 +62,56 @@ export interface TransferJob {
   smartsheetId: number;
   columnMappings: ColumnMapping[];
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-  progress: {
-    totalRows: number;
-    processedRows: number;
-    totalImages: number;
-    processedImages: number;
-    progressPercentage?: number;
-    imageProgressPercentage?: number;
-    errors: TransferError[];
-  };
+  progress: TransferProgress;
   dryRun: boolean;
   createdAt: string;
   completedAt?: string;
+  // Enhanced job metadata
+  sourceInfo?: SourceInfo;
+  targetInfo?: TargetInfo;
+  logs?: TransferLog[];
+}
+
+export interface TransferProgress {
+  totalRows: number;
+  processedRows: number;
+  totalImages: number;
+  processedImages: number;
+  currentBatch?: number;
+  totalBatches?: number;
+  errors: TransferError[];
+  warnings: TransferWarning[];
+  progressPercentage?: number;
+  imageProgressPercentage?: number;
+}
+
+export interface SourceInfo {
+  spreadsheetTitle: string;
+  tabNames: string[];
+  headerRowIndex: number;
+  totalDataRows: number;
+  totalImages: number;
+}
+
+export interface TargetInfo {
+  sheetName: string;
+  workspaceName?: string;
+  folderName?: string;
+  sheetUrl?: string;
+}
+
+export interface TransferLog {
+  timestamp: string;
+  level: 'info' | 'warn' | 'error' | 'success';
+  message: string;
+  emoji: string;
+  details?: any;
+}
+
+export interface TransferWarning {
+  type: 'image_fallback' | 'data_truncation' | 'type_conversion';
+  message: string;
+  count?: number;
 }
 
 export interface TransferError {

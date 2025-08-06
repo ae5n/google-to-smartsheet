@@ -1,6 +1,7 @@
 import React from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import TransferWizard from '../components/TransferWizard';
+import TransferProgress from '../components/TransferProgress';
 
 function TransferPage() {
   const { jobId } = useParams();
@@ -12,11 +13,17 @@ function TransferPage() {
 
   if (jobId) {
     return (
-      <div className="max-w-4xl mx-auto">
-        <h1 className="text-2xl font-bold text-gray-900 mb-8">Transfer Job: {jobId}</h1>
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-          <p className="text-gray-600">Transfer job details and progress tracking will be implemented here.</p>
+      <div className="max-w-6xl mx-auto">
+        <div className="mb-6">
+          <button
+            onClick={() => navigate('/transfer')}
+            className="inline-flex items-center text-blue-600 hover:text-blue-800"
+          >
+            <span className="mr-2">←</span>
+            Back to New Transfer
+          </button>
         </div>
+        <TransferProgress jobId={jobId} />
       </div>
     );
   }

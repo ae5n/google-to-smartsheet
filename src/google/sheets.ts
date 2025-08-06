@@ -383,6 +383,27 @@ export class GoogleSheetsService {
     return headerPatterns.some(pattern => pattern.test(text));
   }
 
+  public async getSpreadsheetInfo(
+    encryptedTokens: EncryptedTokens,
+    spreadsheetId: string
+  ): Promise<{ title: string } | null> {
+    try {
+      const sheetsClient = await this.createSheetsClient(encryptedTokens);
+      
+      const response = await sheetsClient.spreadsheets.get({
+        spreadsheetId,
+        fields: 'properties(title)'
+      });
+
+      return {
+        title: response.data.properties?.title || 'Unknown Spreadsheet'
+      };
+    } catch (error: any) {
+      console.log(`⚠️ Could not get spreadsheet title: ${error.message}`);
+      return null;
+    }
+  }
+
   public async validateSpreadsheetAccess(
     encryptedTokens: EncryptedTokens,
     spreadsheetId: string

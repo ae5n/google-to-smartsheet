@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import config from '../config';
-import { User, TransferJob, ImageCache, OAuthState } from '../types';
+import { User, TransferJob, TransferLog, SourceInfo, TargetInfo, ImageCache, OAuthState } from '../types';
 
 interface DatabaseData {
   users: User[];
@@ -121,6 +121,23 @@ class DatabaseManager {
       if (['completed', 'failed', 'cancelled'].includes(status)) {
         job.completedAt = new Date();
       }
+      await this.save();
+    }
+  }
+
+  public async updateTransferJobLogs(id: string, logs: TransferLog[]): Promise<void> {
+    const job = this.data.transferJobs.find(j => j.id === id);
+    if (job) {
+      job.logs = logs;
+      await this.save();
+    }
+  }
+
+  public async updateTransferJobInfo(id: string, sourceInfo?: SourceInfo, targetInfo?: TargetInfo): Promise<void> {
+    const job = this.data.transferJobs.find(j => j.id === id);
+    if (job) {
+      if (sourceInfo) job.sourceInfo = sourceInfo;
+      if (targetInfo) job.targetInfo = targetInfo;
       await this.save();
     }
   }
