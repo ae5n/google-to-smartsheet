@@ -49,6 +49,7 @@ export interface ColumnMapping {
   googleColumn: string;
   smartsheetColumnId: number;
   dataType: 'text' | 'number' | 'date' | 'image' | 'hyperlink';
+  googleColumnIndex?: number;
 }
 
 export interface TransferJob {
@@ -61,6 +62,8 @@ export interface TransferJob {
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   progress: TransferProgress;
   dryRun: boolean;
+  headerRowIndex?: number;
+  selectedColumns?: number[];
   createdAt: Date;
   completedAt?: Date;
   // Enhanced job metadata

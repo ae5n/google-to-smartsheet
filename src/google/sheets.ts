@@ -277,13 +277,68 @@ export class GoogleSheetsService {
     }
   }
 
+  public async getHeaderPreview(
+    encryptedTokens: EncryptedTokens,
+    spreadsheetId: string,
+    sheetTab: string
+  ): Promise<{
+    rows: string[][];
+    detectedHeaderRow: number;
+    detectedHeaders: string[];
+    rowOptions: Array<{ rowIndex: number; preview: string[]; score: number }>;
+  }> {
+    try {
+      const sheetsClient = await this.createSheetsClient(encryptedTokens);
+      
+      // Get first 10 rows for header selection
+      const response = await sheetsClient.spreadsheets.values.get({
+        spreadsheetId,
+        range: `'${sheetTab}'!1:10`,
+        valueRenderOption: 'FORMATTED_VALUE'
+      });
+
+      const rows = response.data.values || [];
+      
+      // Find the best header row using existing algorithm
+      const bestHeaderRow = this.findBestHeaderRow(rows);
+      
+      // Score all rows to give users options
+      const rowOptions: Array<{ rowIndex: number; preview: string[]; score: number }> = [];
+      
+      for (let i = 0; i < Math.min(rows.length, 10); i++) {
+        const row = rows[i] || [];
+        const processedHeaders = this.processHeaderRow(row);
+        const score = this.scoreHeaderRow(processedHeaders, rows, i);
+        
+        rowOptions.push({
+          rowIndex: i,
+          preview: processedHeaders.slice(0, 10), // Show first 10 columns
+          score
+        });
+      }
+      
+      // Sort by score (highest first)
+      rowOptions.sort((a, b) => b.score - a.score);
+      
+      return {
+        rows: rows.map(row => (row || []).slice(0, 15)), // Show first 15 columns for preview
+        detectedHeaderRow: bestHeaderRow.rowIndex,
+        detectedHeaders: bestHeaderRow.headers.slice(0, 15),
+        rowOptions: rowOptions.slice(0, 5) // Show top 5 candidates
+      };
+    } catch (error: any) {
+      throw new Error(`Failed to get header preview: ${error.message}`);
+    }
+  }
+
   private findBestHeaderRow(rows: any[][]): { headers: string[]; rowIndex: number } {
     let bestRow = { headers: [] as string[], rowIndex: 0, score: -1 };
     
-    for (let rowIndex = 0; rowIndex < Math.min(rows.length, 5); rowIndex++) {
+    // Check up to 10 rows for better header detection
+    for (let rowIndex = 0; rowIndex < Math.min(rows.length, 10); rowIndex++) {
       const row = rows[rowIndex] || [];
       const processedHeaders = this.processHeaderRow(row);
-      const score = this.scoreHeaderRow(processedHeaders);
+      const score = this.scoreHeaderRow(processedHeaders, rows, rowIndex);
       
       if (score > bestRow.score) {
         bestRow = {
@@ -320,7 +375,7 @@ export class GoogleSheetsService {
     });
   }
 
-  private scoreHeaderRow(headers: string[]): number {
+  private scoreHeaderRow(headers: string[], allRows: any[][], rowIndex: number): number {
     let score = 0;
     const nonGenericHeaders = headers.filter(h => !h.startsWith('Column '));
     
@@ -330,25 +385,68 @@ export class GoogleSheetsService {
     // Bonus for headers that look like actual column names
     for (const header of nonGenericHeaders) {
       // Short, concise headers get bonus points
-      if (header.length >= 2 && header.length <= 20) {
+      if (header.length >= 2 && header.length <= 30) {
         score += 1;
       }
       
       // Headers with common column patterns
       if (this.isLikelyColumnHeader(header)) {
-        score += 2;
+        score += 3;
       }
       
       // Penalty for very long headers (likely content, not headers)
       if (header.length > 50) {
-        score -= 1;
+        score -= 2;
       }
     }
     
-    // Bonus for having a reasonable number of headers (not too few, not too many)
+    // Analyze data consistency below this row
+    if (rowIndex < allRows.length - 1) {
+      const nextRow = allRows[rowIndex + 1];
+      if (nextRow && nextRow.length > 0) {
+        // Check if next row has different data types (suggesting this is a header)
+        let hasDataBelow = false;
+        for (let i = 0; i < Math.min(headers.length, nextRow.length); i++) {
+          const headerCell = headers[i];
+          const dataCell = nextRow[i];
+          
+          // If header is text and data below is different type, likely a header
+          if (headerCell && !headerCell.startsWith('Column ') && dataCell) {
+            const isHeaderText = isNaN(Number(headerCell));
+            const isDataNumber = !isNaN(Number(dataCell));
+            
+            if (isHeaderText && isDataNumber) {
+              score += 2; // Strong indicator
+              hasDataBelow = true;
+            } else if (dataCell && dataCell !== '') {
+              hasDataBelow = true;
+            }
+          }
+        }
+        
+        if (hasDataBelow) {
+          score += 3;
+        }
+      }
+    }
+    
+    // Check if row is mostly filled (headers usually have most columns filled)
+    const filledCells = headers.filter(h => h && !h.startsWith('Column ')).length;
+    const fillRatio = headers.length > 0 ? filledCells / headers.length : 0;
+    if (fillRatio > 0.7) {
+      score += 3;
+    }
+    
+    // Bonus for having a reasonable number of headers
     const totalHeaders = headers.length;
     if (totalHeaders >= 3 && totalHeaders <= 50) {
-      score += 1;
+      score += 2;
+    }
+    
+    // Penalty if row appears to be data (all numbers or dates)
+    const allNumeric = nonGenericHeaders.every(h => !isNaN(Number(h)) || /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(h));
+    if (allNumeric && nonGenericHeaders.length > 0) {
+      score -= 10;
     }
     
     return score;
@@ -374,10 +472,33 @@ export class GoogleSheetsService {
 
   private isLikelyColumnHeader(text: string): boolean {
     const headerPatterns = [
+      // Common generic headers
       /^(id|name|title|description|type|status|date|time|amount|price|quantity|total)$/i,
       /^(item|product|service|category|group|department|location|contact|email|phone)$/i,
-      /^(address|city|state|country|zip|code|number|reference|comment|note)$/i,
-      /\b(id|name|date|time|status|type|code)\b/i,
+      /^(address|city|state|country|zip|code|number|reference|comment|note|notes)$/i,
+      
+      // Construction/Project headers
+      /^(project|job|task|phase|trade|contractor|subcontractor|vendor|bid)$/i,
+      /^(scope|work|material|labor|equipment|cost|budget|actual|variance)$/i,
+      /^(schedule|start|end|duration|completion|milestone|deliverable)$/i,
+      /^(rfi|submittal|change.?order|co|drawing|spec|revision)$/i,
+      
+      // Finance/Accounting headers
+      /^(account|invoice|payment|balance|credit|debit|tax|discount)$/i,
+      /^(revenue|expense|profit|margin|rate|fee|charge)$/i,
+      /^(po|purchase.?order|requisition|approval|authorized)$/i,
+      
+      // HR/Employee headers
+      /^(employee|staff|worker|manager|supervisor|department|division)$/i,
+      /^(hours|overtime|pto|vacation|sick|rate|salary|wage)$/i,
+      
+      // Inventory/Supply headers
+      /^(sku|part|component|stock|inventory|qty|unit|uom)$/i,
+      /^(warehouse|bin|shelf|supplier|manufacturer|brand)$/i,
+      
+      // Contains key words
+      /\b(id|name|date|time|status|type|code|no|num|qty|amt)\b/i,
+      /\b(total|subtotal|sum|count|avg|min|max)\b/i,
     ];
     
     return headerPatterns.some(pattern => pattern.test(text));

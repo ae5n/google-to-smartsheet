@@ -7,7 +7,7 @@ interface TransferWizardProps {
   onJobCreated?: (jobId: string) => void;
 }
 
-type WizardStep = 'google-selection' | 'smartsheet-target' | 'column-mapping' | 'preview' | 'execution';
+type WizardStep = 'google-selection' | 'header-selection' | 'smartsheet-target' | 'preview' | 'execution';
 
 const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
   const [currentStep, setCurrentStep] = useState<WizardStep>('google-selection');
@@ -30,6 +30,16 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
   const [newSheetName, setNewSheetName] = useState('');
   const [existingSheets, setExistingSheets] = useState<SmartsheetSheet[]>([]);
   const [selectedExistingSheet, setSelectedExistingSheet] = useState<SmartsheetSheet | null>(null);
+
+  // Header selection
+  const [headerPreview, setHeaderPreview] = useState<{
+    rows: string[][];
+    detectedHeaderRow: number;
+    detectedHeaders: string[];
+    rowOptions: Array<{ rowIndex: number; preview: string[]; score: number }>;
+  } | null>(null);
+  const [selectedHeaderRow, setSelectedHeaderRow] = useState<number>(0);
+  const [selectedColumns, setSelectedColumns] = useState<number[]>([]);
 
   // Column mapping
   const [columnMappings, setColumnMappings] = useState<ColumnMapping[]>([]);
@@ -140,6 +150,32 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
     }
   };
 
+  const loadHeaderPreview = async () => {
+    if (!selectedSpreadsheet || selectedTabs.length === 0) return;
+
+    try {
+      setLoading(true);
+      const response = await googleAPI.getHeaderPreview(selectedSpreadsheet.spreadsheetId, selectedTabs[0]);
+      if (response.data.success && response.data.data) {
+        const preview = response.data.data;
+        setHeaderPreview(preview);
+        setSelectedHeaderRow(preview.detectedHeaderRow);
+        setGoogleHeaders(preview.detectedHeaders);
+        // Initialize selected columns - select all columns by default
+        const allColumns = Array.from({ length: preview.detectedHeaders.length }, (_, i) => i);
+        setSelectedColumns(allColumns);
+      } else {
+        console.error('Failed to load header preview:', response.data.error);
+        toast.error('Failed to load header preview');
+      }
+    } catch (error) {
+      console.error('Error loading header preview:', error);
+      toast.error('Failed to load header preview');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const loadGoogleHeaders = async () => {
     if (!selectedSpreadsheet || selectedTabs.length === 0) return;
 
@@ -165,14 +201,14 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
     switch (step) {
       case 'google-selection':
         return selectedSpreadsheet !== null && selectedTabs.length > 0;
+      case 'header-selection':
+        return headerPreview !== null && selectedHeaderRow >= 0 && selectedColumns.length > 0;
       case 'smartsheet-target':
         if (targetOption === 'new') {
           return newSheetName.trim() !== '' && selectedWorkspace !== null;
         } else {
           return selectedExistingSheet !== null;
         }
-      case 'column-mapping':
-        return columnMappings.length > 0;
       case 'preview':
         return true;
       default:
@@ -181,11 +217,18 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
   };
 
   const handleNext = async () => {
-    const steps: WizardStep[] = ['google-selection', 'smartsheet-target', 'column-mapping', 'preview', 'execution'];
+    const steps: WizardStep[] = ['google-selection', 'header-selection', 'smartsheet-target', 'preview', 'execution'];
     const currentIndex = steps.indexOf(currentStep);
     
     if (currentStep === 'google-selection' && canProceedFromStep(currentStep)) {
-      await loadGoogleHeaders();
+      await loadHeaderPreview();
+    }
+    
+    if (currentStep === 'header-selection' && canProceedFromStep(currentStep) && headerPreview) {
+      // Update headers based on selected row and columns
+      const selectedRowHeaders = headerPreview.rows[selectedHeaderRow] || [];
+      const filteredHeaders = selectedColumns.map(colIndex => selectedRowHeaders[colIndex] || `Column ${colIndex + 1}`);
+      setGoogleHeaders(filteredHeaders);
     }
     
     if (currentIndex < steps.length - 1) {
@@ -194,7 +237,7 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
   };
 
   const handlePrevious = () => {
-    const steps: WizardStep[] = ['google-selection', 'smartsheet-target', 'column-mapping', 'preview', 'execution'];
+    const steps: WizardStep[] = ['google-selection', 'header-selection', 'smartsheet-target', 'preview', 'execution'];
     const currentIndex = steps.indexOf(currentStep);
     
     if (currentIndex > 0) {
@@ -268,14 +311,20 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
 
         setExecutionStep('Creating new Smartsheet...');
         
-        // Create basic columns based on Google headers, filtering out empty titles
-        const columns = googleHeaders
-          .map((header, index) => ({
-            title: sanitizeColumnTitle(header, index, googleHeaders),
+        // Create columns based on selected columns and headers
+        const selectedHeaders = selectedColumns.map(colIndex => {
+          const originalHeaders = headerPreview?.rows[selectedHeaderRow] || [];
+          return originalHeaders[colIndex] || `Column ${colIndex + 1}`;
+        });
+        
+        const columns = selectedHeaders.map((header, index) => {
+          const sanitizedTitle = sanitizeColumnTitle(header, index, selectedHeaders);
+          return {
+            title: sanitizedTitle,
             type: 'TEXT_NUMBER' as const,
             primary: index === 0
-          }))
-          .filter(col => col.title.length > 0); // Ensure no empty titles
+          };
+        });
 
         // Ensure we have at least one column
         if (columns.length === 0) {
@@ -286,7 +335,6 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
           });
         }
 
-        console.log('Creating sheet:', newSheetName.trim());
 
         const response = await smartsheetAPI.createSheet(
           newSheetName.trim(),
@@ -303,14 +351,17 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
         setCreatedSheet(targetSheet);
         
         
-        // Create temporary column mappings (backend will fix with real IDs)
-        const tempMappings: ColumnMapping[] = googleHeaders
-          .filter(header => header && header.trim())
-          .map((header, index) => ({
-            googleColumn: header.trim(),
-            smartsheetColumnId: index + 1, // Temporary - backend will fix
-            dataType: 'text' as const
-          }));
+        // Create temporary column mappings based on selected columns (backend will fix with real IDs)
+        const tempMappings: ColumnMapping[] = selectedHeaders
+          .map((header, index) => {
+            const cleanHeader = header?.trim() || `Column ${selectedColumns[index] + 1}`;
+            return {
+              googleColumn: cleanHeader,
+              smartsheetColumnId: index + 1, // Temporary - backend will fix
+              dataType: 'text' as const,
+              googleColumnIndex: selectedColumns[index] // Add original column index for backend
+            };
+          });
 
         setColumnMappings(tempMappings);
         toast.success('Smartsheet created successfully');
@@ -321,34 +372,95 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
         }
         targetSheet = selectedExistingSheet;
         
-        // Create temporary column mappings for existing sheet (backend will fix with real IDs)
-        const tempMappings: ColumnMapping[] = googleHeaders
-          .filter(header => header && header.trim())
-          .map((header, index) => ({
-            googleColumn: header.trim(),
-            smartsheetColumnId: index + 1, // Temporary - backend will fix
-            dataType: 'text' as const
-          }));
+        // Create temporary column mappings for existing sheet based on selected columns (backend will fix with real IDs)
+        const selectedHeaders = selectedColumns.map(colIndex => {
+          const originalHeaders = headerPreview?.rows[selectedHeaderRow] || [];
+          return originalHeaders[colIndex] || `Column ${colIndex + 1}`;
+        });
+        
+        const tempMappings: ColumnMapping[] = selectedHeaders
+          .map((header, index) => {
+            const cleanHeader = header?.trim() || `Column ${selectedColumns[index] + 1}`;
+            return {
+              googleColumn: cleanHeader,
+              smartsheetColumnId: index + 1, // Temporary - backend will fix
+              dataType: 'text' as const,
+              googleColumnIndex: selectedColumns[index] // Add original column index for backend
+            };
+          });
 
         setColumnMappings(tempMappings);
       }
 
       setExecutionStep('Creating transfer job...');
 
+      // Get the actual mappings to use (from whichever path was taken above)
+      let mappingsToUse: ColumnMapping[];
+      if (targetOption === 'new') {
+        // For new sheets, create the mappings again to ensure we have them
+        const selectedHeaders = selectedColumns.map(colIndex => {
+          const originalHeaders = headerPreview?.rows[selectedHeaderRow] || [];
+          return originalHeaders[colIndex] || `Column ${colIndex + 1}`;
+        });
+        
+        mappingsToUse = selectedHeaders.map((header, index) => {
+          const cleanHeader = header?.trim() || `Column ${selectedColumns[index] + 1}`;
+          return {
+            googleColumn: cleanHeader,
+            smartsheetColumnId: index + 1, // Temporary - backend will fix
+            dataType: 'text' as const,
+            googleColumnIndex: selectedColumns[index] // Add original column index for backend
+          };
+        });
+      } else {
+        // For existing sheets, create the mappings again
+        const selectedHeaders = selectedColumns.map(colIndex => {
+          const originalHeaders = headerPreview?.rows[selectedHeaderRow] || [];
+          return originalHeaders[colIndex] || `Column ${colIndex + 1}`;
+        });
+        
+        mappingsToUse = selectedHeaders.map((header, index) => {
+          const cleanHeader = header?.trim() || `Column ${selectedColumns[index] + 1}`;
+          return {
+            googleColumn: cleanHeader,
+            smartsheetColumnId: index + 1, // Temporary - backend will fix
+            dataType: 'text' as const,
+            googleColumnIndex: selectedColumns[index] // Add original column index for backend
+          };
+        });
+      }
+
+      // Validate selected columns before creating job
+      if (selectedColumns.length === 0) {
+        throw new Error('No columns selected. Please go back and select at least one column to transfer.');
+      }
+
       // Validate column mappings before creating job
-      if (columnMappings.length === 0) {
-        throw new Error('No valid column mappings found. Please check your Google Sheet headers.');
+      if (mappingsToUse.length === 0) {
+        throw new Error('No valid column mappings found. Please check your Google Sheet headers and ensure at least one column has a valid header.');
       }
 
 
       // Create transfer job
-      const jobResponse = await transferAPI.createJob({
+      const jobData: {
+        googleSpreadsheetId: string;
+        googleSheetTabs: string[];
+        smartsheetId: number;
+        columnMappings: ColumnMapping[];
+        dryRun: boolean;
+        headerRowIndex: number;
+        selectedColumns: number[];
+      } = {
         googleSpreadsheetId: selectedSpreadsheet.spreadsheetId,
         googleSheetTabs: selectedTabs,
         smartsheetId: targetSheet.id,
-        columnMappings: columnMappings,
-        dryRun: false
-      });
+        columnMappings: mappingsToUse,
+        dryRun: false,
+        headerRowIndex: selectedHeaderRow,
+        selectedColumns: selectedColumns
+      };
+      
+      const jobResponse = await transferAPI.createJob(jobData as any);
 
       if (!jobResponse.data.success) {
         throw new Error(jobResponse.data.error || 'Failed to create transfer job');
@@ -387,6 +499,169 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
       setIsExecuting(false);
     }
   };
+
+  const renderHeaderSelectionStep = () => (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-lg font-medium text-gray-900 mb-4">Select Header Row</h3>
+        <p className="text-sm text-gray-600 mb-4">
+          Choose which row contains your column headers. Our algorithm detected the most likely header row, but you can select a different one if needed.
+        </p>
+        
+        {loading ? (
+          <div className="text-center py-4">Loading header preview...</div>
+        ) : headerPreview ? (
+          <div className="space-y-4">
+            {/* Header row options */}
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <h4 className="font-medium text-blue-900 mb-2">
+                🔍 Detected Header Row: {headerPreview.detectedHeaderRow + 1}
+              </h4>
+              <div className="flex flex-wrap gap-1">
+                {headerPreview.detectedHeaders.slice(0, 10).map((header, index) => (
+                  <span key={index} className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs">
+                    {header || `Col ${index + 1}`}
+                  </span>
+                ))}
+                {headerPreview.detectedHeaders.length > 10 && (
+                  <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs">
+                    +{headerPreview.detectedHeaders.length - 10} more
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Row selection */}
+            <div className="space-y-2">
+              <h4 className="font-medium text-gray-900">Select Header Row:</h4>
+              <div className="bg-white border rounded-lg overflow-hidden">
+                <div className="grid grid-cols-12 gap-1 p-2 bg-gray-50 border-b text-xs font-medium text-gray-600">
+                  <div>Row</div>
+                  <div className="col-span-11">Preview (first 11 columns)</div>
+                </div>
+                
+                {headerPreview.rows.slice(0, 8).map((row, rowIndex) => (
+                  <label
+                    key={rowIndex}
+                    className={`grid grid-cols-12 gap-1 p-2 border-b cursor-pointer hover:bg-gray-50 ${
+                      selectedHeaderRow === rowIndex ? 'bg-blue-50 border-blue-200' : ''
+                    }`}
+                  >
+                    <div className="flex items-center">
+                      <input
+                        type="radio"
+                        name="headerRow"
+                        value={rowIndex}
+                        checked={selectedHeaderRow === rowIndex}
+                        onChange={() => setSelectedHeaderRow(rowIndex)}
+                        className="mr-2"
+                      />
+                      <span className="text-sm font-medium">{rowIndex + 1}</span>
+                    </div>
+                    <div className="col-span-11 grid grid-cols-11 gap-1">
+                      {Array.from({ length: 11 }, (_, colIndex) => (
+                        <div
+                          key={colIndex}
+                          className="text-xs p-1 bg-gray-100 rounded truncate"
+                          title={row[colIndex] || ''}
+                        >
+                          {row[colIndex] || '-'}
+                        </div>
+                      ))}
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* Column selection */}
+            {selectedHeaderRow >= 0 && headerPreview.rows[selectedHeaderRow] && (
+              <div className="space-y-4">
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                  <h4 className="font-medium text-blue-900 mb-3">
+                    📋 Select Columns to Transfer from Row {selectedHeaderRow + 1}:
+                  </h4>
+                  <div className="space-y-2 max-h-60 overflow-y-auto">
+                    <div className="flex items-center mb-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (selectedColumns.length === headerPreview.rows[selectedHeaderRow].length) {
+                            setSelectedColumns([]);
+                          } else {
+                            const allColumns = Array.from({ length: headerPreview.rows[selectedHeaderRow].length }, (_, i) => i);
+                            setSelectedColumns(allColumns);
+                          }
+                        }}
+                        className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
+                      >
+                        {selectedColumns.length === headerPreview.rows[selectedHeaderRow].length ? 'Deselect All' : 'Select All'}
+                      </button>
+                      <span className="ml-3 text-sm text-blue-700">
+                        {selectedColumns.length} of {headerPreview.rows[selectedHeaderRow].length} columns selected
+                      </span>
+                    </div>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                      {headerPreview.rows[selectedHeaderRow].map((header, colIndex) => (
+                        <label key={colIndex} className="flex items-center space-x-2 p-2 border rounded hover:bg-gray-50">
+                          <input
+                            type="checkbox"
+                            checked={selectedColumns.includes(colIndex)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedColumns([...selectedColumns, colIndex].sort((a, b) => a - b));
+                              } else {
+                                setSelectedColumns(selectedColumns.filter(col => col !== colIndex));
+                              }
+                            }}
+                            className="rounded border-gray-300"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-medium text-gray-900 truncate">
+                              {header || `Column ${colIndex + 1}`}
+                            </div>
+                            <div className="text-xs text-gray-500">
+                              Column {colIndex + 1}
+                            </div>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Selected columns preview */}
+                {selectedColumns.length > 0 && (
+                  <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                    <h4 className="font-medium text-green-900 mb-2">
+                      ✓ Selected Columns ({selectedColumns.length}):
+                    </h4>
+                    <div className="flex flex-wrap gap-1">
+                      {selectedColumns.slice(0, 15).map((colIndex) => (
+                        <span key={colIndex} className="px-2 py-1 bg-green-100 text-green-800 rounded text-xs">
+                          {headerPreview.rows[selectedHeaderRow][colIndex] || `Col ${colIndex + 1}`}
+                        </span>
+                      ))}
+                      {selectedColumns.length > 15 && (
+                        <span className="px-2 py-1 bg-green-100 text-green-800 rounded text-xs">
+                          +{selectedColumns.length - 15} more
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="text-center py-8 text-gray-500">
+            Please go back and select a Google Sheet first.
+          </div>
+        )}
+      </div>
+    </div>
+  );
 
   const renderGoogleSelectionStep = () => (
     <div className="space-y-6">
@@ -597,56 +872,6 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
     </div>
   );
 
-  const renderColumnMappingStep = () => (
-    <div className="space-y-6">
-      <div>
-        <h3 className="text-lg font-medium text-gray-900 mb-4">Column Mapping</h3>
-        <p className="text-sm text-gray-600 mb-4">
-          Map columns from your Google Sheet to Smartsheet columns. This step will be enhanced with actual mapping interface.
-        </p>
-        
-        <div className="bg-gray-50 p-4 rounded-lg">
-          <h4 className="font-medium mb-2">Google Sheet Headers:</h4>
-          <div className="flex flex-wrap gap-2">
-            {googleHeaders.map((header, index) => (
-              <span key={index} className="px-2 py-1 bg-blue-100 text-blue-800 rounded-md text-sm">
-                {header}
-              </span>
-            ))}
-          </div>
-        </div>
-
-        <div className="mt-4">
-          <button
-            type="button"
-            onClick={() => {
-              // Create temporary mappings - these will be fixed during transfer execution
-              const mappings: ColumnMapping[] = googleHeaders
-                .filter(header => header && header.trim())
-                .map((header, index) => ({
-                  googleColumn: header.trim(),
-                  smartsheetColumnId: index + 1, // Temporary - will be fixed in executeTransfer
-                  dataType: 'text' as const
-                }));
-              
-              setColumnMappings(mappings);
-              toast.success('Basic column mappings created (will use correct IDs during transfer)');
-            }}
-            className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
-          >
-            Create Basic Mappings
-          </button>
-        </div>
-
-        {columnMappings.length > 0 && (
-          <div className="mt-4 bg-green-50 p-4 rounded-lg">
-            <h4 className="font-medium mb-2">Mappings Created:</h4>
-            <p className="text-sm text-green-700">{columnMappings.length} column mappings configured</p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
 
   const renderPreviewStep = () => (
     <div className="space-y-6">
@@ -661,16 +886,38 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
             <span className="font-medium">Tabs:</span> {selectedTabs.join(', ')}
           </div>
           <div>
+            <span className="font-medium">Header Row:</span> Row {selectedHeaderRow + 1}
+          </div>
+          <div>
+            <span className="font-medium">Selected Columns:</span> {selectedColumns.length} columns
+          </div>
+          <div>
             <span className="font-medium">Target:</span> 
             {targetOption === 'new' 
               ? ` New sheet "${newSheetName}" in ${selectedWorkspace?.name}${selectedFolder ? ` > ${selectedFolder.name}` : ''}`
               : ` Existing sheet "${selectedExistingSheet?.name}"`
             }
           </div>
-          <div>
-            <span className="font-medium">Column Mappings:</span> {columnMappings.length}
-          </div>
         </div>
+
+        {/* Show selected columns preview */}
+        {googleHeaders.length > 0 && (
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <h4 className="font-medium text-blue-900 mb-2">Columns to Transfer:</h4>
+            <div className="flex flex-wrap gap-1">
+              {googleHeaders.slice(0, 15).map((header, index) => (
+                <span key={index} className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs">
+                  {header}
+                </span>
+              ))}
+              {googleHeaders.length > 15 && (
+                <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs">
+                  +{googleHeaders.length - 15} more
+                </span>
+              )}
+            </div>
+          </div>
+        )}
 
         <div className="mt-4">
           <button
@@ -764,10 +1011,10 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
     switch (currentStep) {
       case 'google-selection':
         return renderGoogleSelectionStep();
+      case 'header-selection':
+        return renderHeaderSelectionStep();
       case 'smartsheet-target':
         return renderSmartsheetTargetStep();
-      case 'column-mapping':
-        return renderColumnMappingStep();
       case 'preview':
         return renderPreviewStep();
       case 'execution':
@@ -778,15 +1025,15 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
   };
 
   const getStepNumber = (step: WizardStep): number => {
-    const steps: WizardStep[] = ['google-selection', 'smartsheet-target', 'column-mapping', 'preview', 'execution'];
+    const steps: WizardStep[] = ['google-selection', 'header-selection', 'smartsheet-target', 'preview', 'execution'];
     return steps.indexOf(step) + 1;
   };
 
   const getStepTitle = (step: WizardStep): string => {
     const titles = {
       'google-selection': 'Select Google Sheet',
+      'header-selection': 'Choose Headers & Columns',
       'smartsheet-target': 'Choose Target',
-      'column-mapping': 'Map Columns',
       'preview': 'Preview & Confirm',
       'execution': 'Transfer Data'
     };

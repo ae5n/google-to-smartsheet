@@ -66,7 +66,9 @@ export class TransferService {
     googleSheetTabs: string[],
     smartsheetId: number,
     columnMappings: ColumnMapping[],
-    dryRun: boolean = false
+    dryRun: boolean = false,
+    headerRowIndex?: number,
+    selectedColumns?: number[]
   ): Promise<TransferJob> {
     const job: Omit<TransferJob, 'createdAt' | 'completedAt'> = {
       id: uuidv4(),
@@ -85,7 +87,9 @@ export class TransferService {
         warnings: []
       },
       logs: [],
-      dryRun
+      dryRun,
+      headerRowIndex,
+      selectedColumns
     };
 
     return await database.createTransferJob(job);
@@ -155,13 +159,17 @@ export class TransferService {
     googleTokens: EncryptedTokens,
     smartsheetTokens: EncryptedTokens
   ): Promise<void> {
-    // First, get header information to determine the correct data range
-    const firstTab = job.googleSheetTabs[0];
-    const { headerRowIndex } = await googleSheetsService.getSpreadsheetHeadersWithRowIndex(
-      googleTokens,
-      job.googleSpreadsheetId,
-      firstTab
-    );
+    // Use user-selected header row index or detect it automatically
+    let headerRowIndex = job.headerRowIndex;
+    if (headerRowIndex === undefined) {
+      const firstTab = job.googleSheetTabs[0];
+      const result = await googleSheetsService.getSpreadsheetHeadersWithRowIndex(
+        googleTokens,
+        job.googleSpreadsheetId,
+        firstTab
+      );
+      headerRowIndex = result.headerRowIndex;
+    }
 
     // Get Google Sheets data starting from the correct header row
     const googleData = await googleSheetsService.getSpreadsheetData(
@@ -231,13 +239,17 @@ export class TransferService {
     googleTokens: EncryptedTokens,
     smartsheetTokens: EncryptedTokens
   ): Promise<void> {
-    // First, get header information to determine the correct data range
-    const firstTab = job.googleSheetTabs[0];
-    const { headerRowIndex } = await googleSheetsService.getSpreadsheetHeadersWithRowIndex(
-      googleTokens,
-      job.googleSpreadsheetId,
-      firstTab
-    );
+    // Use user-selected header row index or detect it automatically
+    let headerRowIndex = job.headerRowIndex;
+    if (headerRowIndex === undefined) {
+      const firstTab = job.googleSheetTabs[0];
+      const result = await googleSheetsService.getSpreadsheetHeadersWithRowIndex(
+        googleTokens,
+        job.googleSpreadsheetId,
+        firstTab
+      );
+      headerRowIndex = result.headerRowIndex;
+    }
 
     // Add source and target info to job
     await this.addJobLog(job.id, 'info', 'Transfer started', '🚀', {
@@ -454,7 +466,9 @@ export class TransferService {
 
     for (let i = 0; i < columnMappings.length; i++) {
       const mapping = columnMappings[i];
-      const googleCell = googleRow[i];
+      // Use the original Google column index if available, otherwise fall back to sequential index
+      const googleColumnIndex = mapping.googleColumnIndex !== undefined ? mapping.googleColumnIndex : i;
+      const googleCell = googleRow[googleColumnIndex];
 
       if (!googleCell) {
         smartsheetCells.push({

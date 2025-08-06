@@ -72,6 +72,16 @@ export const googleAPI = {
       params: { sheetTab }
     }),
 
+  getHeaderPreview: (spreadsheetId: string, sheetTab: string): Promise<AxiosResponse<APIResponse<{
+    rows: string[][];
+    detectedHeaderRow: number;
+    detectedHeaders: string[];
+    rowOptions: Array<{ rowIndex: number; preview: string[]; score: number }>;
+  }>>> =>
+    api.get(`/api/google/spreadsheets/${spreadsheetId}/header-preview`, {
+      params: { sheetTab }
+    }),
+
   previewSpreadsheet: (spreadsheetId: string, sheetTabs: string[]): Promise<AxiosResponse<APIResponse<any>>> =>
     api.post(`/api/google/spreadsheets/${spreadsheetId}/preview`, { sheetTabs }),
 
@@ -125,6 +135,8 @@ export const transferAPI = {
     smartsheetId: number;
     columnMappings: any[];
     dryRun?: boolean;
+    headerRowIndex?: number;
+    selectedColumns?: number[];
   }): Promise<AxiosResponse<APIResponse<{ jobId: string; status: string }>>> =>
     api.post('/api/transfer/jobs', jobData),
 

@@ -52,6 +52,7 @@ export interface ColumnMapping {
   googleColumn: string;
   smartsheetColumnId: number;
   dataType: 'text' | 'number' | 'date' | 'image' | 'hyperlink';
+  googleColumnIndex?: number;
 }
 
 export interface TransferJob {

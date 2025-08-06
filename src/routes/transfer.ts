@@ -17,7 +17,9 @@ router.post('/jobs', [
   body('columnMappings.*.googleColumn').notEmpty().withMessage('Google column name is required'),
   body('columnMappings.*.smartsheetColumnId').isInt().withMessage('Smartsheet column ID must be an integer'),
   body('columnMappings.*.dataType').isIn(['text', 'number', 'date', 'image', 'hyperlink']).withMessage('Invalid data type'),
-  body('dryRun').optional().isBoolean().withMessage('Dry run must be a boolean')
+  body('dryRun').optional().isBoolean().withMessage('Dry run must be a boolean'),
+  body('headerRowIndex').optional().isInt({ min: 0 }).withMessage('Header row index must be a non-negative integer'),
+  body('selectedColumns').optional().isArray().withMessage('Selected columns must be an array')
 ], async (req: Request, res: Response) => {
   console.log(`🚀 Creating transfer job for user ${req.session.user?.id}`);
 
@@ -37,7 +39,9 @@ router.post('/jobs', [
       googleSheetTabs,
       smartsheetId,
       columnMappings,
-      dryRun = false
+      dryRun = false,
+      headerRowIndex,
+      selectedColumns
     } = req.body;
 
     const userId = req.session.user!.id;
@@ -65,7 +69,9 @@ router.post('/jobs', [
       googleSheetTabs,
       smartsheetId,
       columnMappings,
-      dryRun
+      dryRun,
+      headerRowIndex,
+      selectedColumns
     );
 
     // Start transfer in background

@@ -123,6 +123,50 @@ router.get('/spreadsheets/:spreadsheetId/headers', async (req: Request, res: Res
   }
 });
 
+router.get('/spreadsheets/:spreadsheetId/header-preview', async (req: Request, res: Response) => {
+  try {
+    const { spreadsheetId } = req.params;
+    const { sheetTab } = req.query;
+    
+    if (!sheetTab || typeof sheetTab !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'Sheet tab name is required'
+      } as APIResponse);
+    }
+
+    const user = await database.getUserById(req.session.user!.id);
+    
+    if (!user?.googleTokens) {
+      return res.status(400).json({
+        success: false,
+        error: 'Google account not connected'
+      } as APIResponse);
+    }
+
+    const validTokens = await googleAuthService.validateAndRefreshTokens(
+      user.id,
+      user.googleTokens
+    );
+
+    const previewData = await googleSheetsService.getHeaderPreview(
+      validTokens,
+      spreadsheetId,
+      sheetTab
+    );
+
+    res.json({
+      success: true,
+      data: previewData
+    } as APIResponse);
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    } as APIResponse);
+  }
+});
+
 router.post('/spreadsheets/:spreadsheetId/preview', async (req: Request, res: Response) => {
   try {
     const { spreadsheetId } = req.params;
