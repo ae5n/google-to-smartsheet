@@ -1,6 +1,7 @@
 import express from 'express';
 import https from 'https';
 import http from 'http';
+import { Server as SocketIOServer } from 'socket.io';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import session from 'express-session';
@@ -12,6 +13,7 @@ import { ensureSSLCertificates } from './utils/ssl';
 import { 
   securityMiddleware, 
   rateLimiter, 
+  pollingRateLimiter,
   generateCSRFToken, 
   validateContentType 
 } from './middleware/security';
@@ -21,12 +23,14 @@ import authRoutes from './routes/auth';
 import googleRoutes from './routes/google';
 import smartsheetRoutes from './routes/smartsheet';
 import transferRoutes from './routes/transfer';
+import { webSocketService } from './services/websocket';
 
 
 class Server {
   private app: express.Application;
   private httpServer?: http.Server;
   private httpsServer?: https.Server;
+  private io?: SocketIOServer;
 
   constructor() {
     this.app = express();
@@ -35,12 +39,43 @@ class Server {
     this.setupErrorHandling();
   }
 
+  private setupWebSocket(): void {
+    if (!this.httpServer) return;
+    
+    this.io = new SocketIOServer(this.httpServer, {
+      cors: {
+        origin: [config.server.clientUrl, 'http://localhost:3000'],
+        credentials: true
+      }
+    });
+
+    this.io.on('connection', (socket) => {
+      // Join room for specific job updates
+      socket.on('join-job', (jobId: string) => {
+        socket.join(`job-${jobId}`);
+      });
+      
+      socket.on('leave-job', (jobId: string) => {
+        socket.leave(`job-${jobId}`);
+      });
+      
+      socket.on('disconnect', () => {
+        // Client disconnected
+      });
+    });
+  }
+
+  public getWebSocketServer(): SocketIOServer | undefined {
+    return this.io;
+  }
+
   private setupMiddleware(): void {
     // Enable trust proxy for development (fixes rate limiter proxy header issues)
     this.app.set('trust proxy', true);
     
     this.app.use(securityMiddleware);
     this.app.use(rateLimiter);
+    this.app.use(pollingRateLimiter);
     this.app.use(requestLogger);
     
     this.app.use(cors({
@@ -149,6 +184,16 @@ class Server {
           console.log(`Server running on port ${config.server.port}`);
         });
       }
+
+      // Setup WebSocket after HTTP server is created
+      this.setupWebSocket();
+      
+      // Initialize WebSocket service with server instance
+      if (this.io) {
+        webSocketService.setServer(this.io);
+      }
+      
+      console.log('🔌 WebSocket server initialized');
 
     } catch (error) {
       console.error('Failed to start server:', error);

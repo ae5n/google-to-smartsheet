@@ -16,6 +16,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@types/node": "^20.10.5",
     "axios": "^1.6.2",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^12.2.0",
@@ -34,9 +35,9 @@
     "mime-types": "^2.1.35",
     "multer": "^2.0.0-rc.4",
     "sharp": "^0.33.1",
-    "uuid": "^9.0.1",
+    "socket.io": "^4.8.1",
     "typescript": "^5.3.3",
-    "@types/node": "^20.10.5"
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

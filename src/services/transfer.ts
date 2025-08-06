@@ -5,6 +5,7 @@ import { smartsheetAPIService } from '../smartsheet/api';
 import { googleAuthService } from '../auth/google';
 import { smartsheetAuthService } from '../auth/smartsheet';
 import database from '../database';
+import { webSocketService } from './websocket';
 import { 
   TransferJob, 
   ColumnMapping, 
@@ -133,6 +134,12 @@ export class TransferService {
 
       await this.addJobLog(jobId, 'success', 'Transfer completed successfully', '✅');
       await database.updateTransferJobStatus(jobId, 'completed');
+      
+      // Emit completion via WebSocket
+      const completedJob = await database.getTransferJobById(jobId);
+      if (completedJob) {
+        webSocketService.emitJobCompleted(jobId, completedJob);
+      }
     } catch (error: any) {
       const currentJob = await database.getTransferJobById(jobId);
       if (currentJob) {
@@ -153,6 +160,12 @@ export class TransferService {
         };
         await this.addJobLog(jobId, 'error', `Transfer failed: ${error.message}`, '❌');
         await database.updateTransferJobStatus(jobId, 'failed', updatedProgress);
+        
+        // Emit failure via WebSocket
+        const failedJob = await database.getTransferJobById(jobId);
+        if (failedJob) {
+          webSocketService.emitJobFailed(jobId, failedJob, error.message);
+        }
       }
       throw error;
     }
@@ -496,6 +509,12 @@ export class TransferService {
           errors,
           warnings: []
         });
+        
+        // Emit progress update via WebSocket every batch
+        const updatedJob = await database.getTransferJobById(job.id);
+        if (updatedJob) {
+          webSocketService.emitJobUpdate(job.id, updatedJob);
+        }
       }
     }
   }

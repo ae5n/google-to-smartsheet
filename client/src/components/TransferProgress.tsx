@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { io, Socket } from 'socket.io-client';
 import { TransferJob } from '../types';
 
 interface TransferProgressProps {
@@ -10,59 +11,143 @@ function TransferProgress({ jobId }: TransferProgressProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showActivityLog, setShowActivityLog] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'fallback'>('connecting');
+  
+  const socketRef = useRef<Socket | null>(null);
+  const fallbackIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    let interval: NodeJS.Timeout | null = null;
-    
-    const fetchProgress = async () => {
+    let isActive = true;
+
+    // Initial data fetch
+    const fetchInitialData = async () => {
       try {
-        console.log('Fetching progress for job:', jobId);
         const response = await fetch(`/api/transfer/jobs/${jobId}`);
-        console.log('Response status:', response.status);
         
         if (!response.ok) {
-          const errorText = await response.text();
-          console.error('Response error:', errorText);
           throw new Error(`Failed to fetch transfer progress: ${response.status}`);
         }
         
         const responseData = await response.json();
-        console.log('Response data:', responseData);
-        
-        // Handle API response format { success: true, data: job }
         const jobData = responseData.success ? responseData.data : responseData;
-        console.log('Processed job data:', jobData);
-        setJob(jobData);
         
-        // Stop polling if job is completed, failed, or cancelled
-        if (jobData && ['completed', 'failed', 'cancelled'].includes(jobData.status)) {
-          console.log('Job finished, stopping polling');
-          if (interval) {
-            clearInterval(interval);
-            interval = null;
-          }
+        if (isActive) {
+          setJob(jobData);
+          setLoading(false);
         }
       } catch (err: any) {
-        console.error('Fetch error:', err);
-        setError(err.message);
-        // Stop polling on error
-        if (interval) {
-          clearInterval(interval);
-          interval = null;
+        if (isActive) {
+          setError(err.message);
+          setLoading(false);
         }
-      } finally {
-        setLoading(false);
       }
     };
 
-    fetchProgress();
+    // WebSocket connection
+    const connectWebSocket = () => {
+      const serverUrl = process.env.NODE_ENV === 'development' 
+        ? 'http://localhost:3001' 
+        : window.location.origin;
+        
+      socketRef.current = io(serverUrl, {
+        transports: ['websocket', 'polling']
+      });
+
+      const socket = socketRef.current;
+
+      socket.on('connect', () => {
+        setConnectionStatus('connected');
+        socket.emit('join-job', jobId);
+      });
+
+      socket.on('disconnect', () => {
+        setConnectionStatus('fallback');
+        startFallbackPolling();
+      });
+
+      socket.on('job-update', (data: { jobId: string; job: TransferJob }) => {
+        if (data.jobId === jobId && isActive) {
+          setJob(data.job);
+        }
+      });
+
+      socket.on('job-completed', (data: { jobId: string; job: TransferJob }) => {
+        if (data.jobId === jobId && isActive) {
+          setJob(data.job);
+        }
+      });
+
+      socket.on('job-failed', (data: { jobId: string; job: TransferJob }) => {
+        if (data.jobId === jobId && isActive) {
+          setJob(data.job);
+        }
+      });
+
+      socket.on('connect_error', () => {
+        setConnectionStatus('fallback');
+        startFallbackPolling();
+      });
+    };
+
+    // Fallback polling (only when WebSocket fails)
+    const startFallbackPolling = () => {
+      if (fallbackIntervalRef.current) return; // Already polling
+      
+      const poll = async () => {
+        if (!isActive) return;
+        
+        try {
+          const response = await fetch(`/api/transfer/jobs/${jobId}`);
+          if (!response.ok) return;
+          
+          const responseData = await response.json();
+          const jobData = responseData.success ? responseData.data : responseData;
+          
+          if (isActive) {
+            setJob(jobData);
+            
+            // Stop polling if job is complete
+            if (jobData && ['completed', 'failed', 'cancelled'].includes(jobData.status)) {
+              if (fallbackIntervalRef.current) {
+                clearInterval(fallbackIntervalRef.current);
+                fallbackIntervalRef.current = null;
+              }
+            }
+          }
+        } catch (err) {
+          // Fallback polling error - silent fail
+        }
+      };
+      
+      // Poll every 30 seconds as fallback (much less aggressive)
+      fallbackIntervalRef.current = setInterval(poll, 30000);
+    };
+
+    // Initialize
+    fetchInitialData();
     
-    // Poll for updates every 2 seconds
-    interval = setInterval(fetchProgress, 2000);
-    
+    // Delay WebSocket connection slightly to avoid React strict mode double-mounting issues
+    const connectTimer = setTimeout(() => {
+      if (isActive) {
+        connectWebSocket();
+      }
+    }, 100);
+
     return () => {
-      if (interval) {
-        clearInterval(interval);
+      isActive = false;
+      clearTimeout(connectTimer);
+      
+      // Cleanup WebSocket
+      if (socketRef.current) {
+        socketRef.current.emit('leave-job', jobId);
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
+      
+      // Cleanup fallback polling
+      if (fallbackIntervalRef.current) {
+        clearInterval(fallbackIntervalRef.current);
+        fallbackIntervalRef.current = null;
       }
     };
   }, [jobId]);
@@ -136,6 +221,26 @@ function TransferProgress({ jobId }: TransferProgressProps) {
 
   return (
     <div className="space-y-6">
+      {/* Connection Status */}
+      {connectionStatus !== 'connected' && (
+        <div className={`border rounded-lg p-3 ${
+          connectionStatus === 'fallback' 
+            ? 'bg-yellow-50 border-yellow-200 text-yellow-800' 
+            : 'bg-blue-50 border-blue-200 text-blue-800'
+        }`}>
+          <div className="flex items-center text-sm">
+            <span className="mr-2">
+              {connectionStatus === 'connecting' && '🔄'}
+              {connectionStatus === 'fallback' && '⚠️'}
+              {connectionStatus === 'disconnected' && '🔌'}
+            </span>
+            {connectionStatus === 'connecting' && 'Connecting to real-time updates...'}
+            {connectionStatus === 'fallback' && 'Using backup polling (WebSocket unavailable)'}
+            {connectionStatus === 'disconnected' && 'Reconnecting...'}
+          </div>
+        </div>
+      )}
+      
       {/* Header */}
       <div className={`border rounded-lg p-6 ${getStatusColor(job.status)}`}>
         <div className="flex items-center justify-between">

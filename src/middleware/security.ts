@@ -31,6 +31,26 @@ export const rateLimiter = rateLimit({
   keyGenerator: (req) => req.ip || 'unknown',
 });
 
+// Higher rate limit specifically for polling endpoints
+export const pollingRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 300, // limit each IP to 300 requests per windowMs (20 req/min)
+  message: 'Too many polling requests from this IP, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip || 'unknown',
+  skip: (req) => {
+    // Only apply to specific polling endpoints
+    const pollingEndpoints = [
+      '/api/transfer/jobs/', // GET requests to job status endpoints
+    ];
+    
+    return !pollingEndpoints.some(endpoint => 
+      req.path.includes(endpoint) && req.method === 'GET'
+    );
+  }
+});
+
 export const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 15, // limit each IP to 15 auth requests per windowMs

@@ -1,8 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
+import { createHash } from 'crypto';
 import { transferService } from '../services/transfer';
 import database from '../database';
-import { requireAuth } from '../middleware/security';
+import { requireAuth, pollingRateLimiter } from '../middleware/security';
 import { APIResponse } from '../types';
 
 const router = Router();
@@ -91,7 +92,7 @@ router.post('/jobs', [
   }
 });
 
-router.get('/jobs/:jobId', async (req: Request, res: Response) => {
+router.get('/jobs/:jobId', pollingRateLimiter, async (req: Request, res: Response) => {
   try {
     const { jobId } = req.params;
     const userId = req.session.user!.id;
@@ -112,6 +113,29 @@ router.get('/jobs/:jobId', async (req: Request, res: Response) => {
       } as APIResponse);
     }
 
+    // Create ETag based on job state for caching
+    const jobStateHash = createHash('md5')
+      .update(JSON.stringify({
+        status: job.status,
+        processedRows: job.progress?.processedRows || 0,
+        processedImages: job.progress?.processedImages || 0,
+        errors: job.progress?.errors?.length || 0,
+        completedAt: job.completedAt
+      }))
+      .digest('hex');
+
+    const etag = `"${jobStateHash}"`;
+    
+    // Check if client has cached version
+    const ifNoneMatch = req.headers['if-none-match'];
+    if (ifNoneMatch === etag) {
+      return res.status(304).end(); // Not modified
+    }
+
+    // Set ETag header for caching
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'private, no-cache');
+    
     res.json({
       success: true,
       data: job
@@ -124,7 +148,7 @@ router.get('/jobs/:jobId', async (req: Request, res: Response) => {
   }
 });
 
-router.get('/jobs/:jobId/progress', async (req: Request, res: Response) => {
+router.get('/jobs/:jobId/progress', pollingRateLimiter, async (req: Request, res: Response) => {
   try {
     const { jobId } = req.params;
     const userId = req.session.user!.id;
@@ -152,6 +176,34 @@ router.get('/jobs/:jobId/progress', async (req: Request, res: Response) => {
     const imageProgressPercentage = job.progress.totalImages > 0
       ? Math.round((job.progress.processedImages / job.progress.totalImages) * 100)
       : 0;
+
+    // Create ETag for progress caching
+    const progressHash = createHash('md5')
+      .update(JSON.stringify({
+        status: job.status,
+        processedRows: job.progress.processedRows,
+        processedImages: job.progress.processedImages,
+        totalRows: job.progress.totalRows,
+        totalImages: job.progress.totalImages,
+        errors: job.progress.errors?.length || 0,
+        warnings: job.progress.warnings?.length || 0,
+        completedAt: job.completedAt,
+        progressPercentage,
+        imageProgressPercentage
+      }))
+      .digest('hex');
+
+    const etag = `"progress-${progressHash}"`;
+    
+    // Check if client has cached version
+    const ifNoneMatch = req.headers['if-none-match'];
+    if (ifNoneMatch === etag) {
+      return res.status(304).end(); // Not modified
+    }
+
+    // Set ETag header for caching
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'private, no-cache');
 
     res.json({
       success: true,
