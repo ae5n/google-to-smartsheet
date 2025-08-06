@@ -96,7 +96,7 @@ export class GoogleSheetsService {
           
           const valueRenderOption = includeFormulas ? 'FORMULA' : 'FORMATTED_VALUE';
           
-          const [valuesResponse, formulasResponse] = await Promise.all([
+          const [valuesResponse, formulasResponse, sheetDataResponse] = await Promise.all([
             sheetsClient.spreadsheets.values.get({
               spreadsheetId,
               range,
@@ -106,13 +106,21 @@ export class GoogleSheetsService {
               spreadsheetId,
               range,
               valueRenderOption: 'FORMULA'
-            }) : Promise.resolve({ data: { values: [] } })
+            }) : Promise.resolve({ data: { values: [] } }),
+            // Get sheet data with embedded objects to detect images
+            sheetsClient.spreadsheets.get({
+              spreadsheetId,
+              ranges: [range],
+              includeGridData: true,
+              fields: 'sheets(data(rowData(values(effectiveValue,formattedValue,hyperlink,textFormatRuns,note))))'
+            }).catch(() => ({ data: { sheets: [] } })) // Fallback if this fails
           ]);
 
           const values = valuesResponse.data.values || [];
           const formulas = formulasResponse.data.values || [];
+          const embeddedData = sheetDataResponse.data.sheets?.[0]?.data?.[0]?.rowData || [];
           
-          const processedData = this.processSheetData(values, formulas);
+          const processedData = this.processSheetData(values, formulas, embeddedData);
           data[tabName] = processedData;
         } catch (error) {
           console.warn(`Failed to get data for tab ${tabName}:`, error);
@@ -126,25 +134,28 @@ export class GoogleSheetsService {
     }
   }
 
-  private processSheetData(values: any[][], formulas: any[][]): GoogleCellValue[][] {
+  private processSheetData(values: any[][], formulas: any[][], embeddedData: any[] = []): GoogleCellValue[][] {
     const processedData: GoogleCellValue[][] = [];
 
     // Determine the maximum number of columns from header row or any row
     const maxColumns = Math.max(
       ...values.map(row => row?.length || 0),
-      ...formulas.map(row => row?.length || 0)
+      ...formulas.map(row => row?.length || 0),
+      ...embeddedData.map(row => row?.values?.length || 0)
     );
 
 
-    for (let rowIndex = 0; rowIndex < values.length; rowIndex++) {
+    for (let rowIndex = 0; rowIndex < Math.max(values.length, embeddedData.length); rowIndex++) {
       const row = values[rowIndex] || [];
       const formulaRow = formulas[rowIndex] || [];
+      const embeddedRow = embeddedData[rowIndex] || {};
       const processedRow: GoogleCellValue[] = [];
 
       // Process all columns up to maxColumns, not just row.length
       for (let colIndex = 0; colIndex < maxColumns; colIndex++) {
         const cellValue = row[colIndex] || ''; // Default to empty string for missing cells
         const formula = formulaRow[colIndex] || '';
+        const embeddedCell = embeddedRow.values?.[colIndex];
         
         const cellData: GoogleCellValue = {
           value: cellValue,
@@ -152,6 +163,7 @@ export class GoogleSheetsService {
           isImage: false
         };
 
+        // Check formula for images first
         if (formula && typeof formula === 'string') {
           const imageMatch = this.extractImageFromFormula(formula);
           if (imageMatch) {
@@ -173,6 +185,30 @@ export class GoogleSheetsService {
             } else {
               cellData.hyperlink = hyperlinkMatch;
             }
+          }
+        }
+
+        // Check for embedded images in cell metadata (for directly inserted images)
+        if (!cellData.isImage && embeddedCell) {
+          const embeddedImageMatch = this.extractEmbeddedImage(embeddedCell);
+          if (embeddedImageMatch) {
+            cellData.isImage = true;
+            cellData.imageUrl = embeddedImageMatch.url;
+            cellData.imageId = embeddedImageMatch.id;
+            // If there's no visible value but there's an image, show placeholder
+            if (!cellData.value || cellData.value === '') {
+              cellData.value = 'Embedded Image';
+            }
+          }
+        }
+
+        // Check cell value for Google Drive image links (for directly imported images with URLs)
+        if (!cellData.isImage && cellValue && typeof cellValue === 'string') {
+          const driveImageMatch = this.extractDriveImageFromValue(cellValue);
+          if (driveImageMatch) {
+            cellData.isImage = true;
+            cellData.imageUrl = driveImageMatch.url;
+            cellData.imageId = driveImageMatch.id;
           }
         }
 
@@ -544,6 +580,104 @@ export class GoogleSheetsService {
       }
       throw error;
     }
+  }
+
+  private extractEmbeddedImage(cellData: any): { url: string; id: string } | null {
+    // Check if this cell has any embedded image information
+    // The Google Sheets API might provide image references in different ways
+    
+    // Check for hyperlinks that might contain Drive image references
+    if (cellData.hyperlink) {
+      const hyperlink = cellData.hyperlink;
+      const drivePattern = /drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/;
+      const match = hyperlink.match(drivePattern);
+      if (match && match[1]) {
+        return {
+          url: `https://drive.google.com/uc?export=download&id=${match[1]}`,
+          id: match[1]
+        };
+      }
+    }
+
+    // Check effectiveValue for any image references
+    if (cellData.effectiveValue) {
+      const effectiveValue = cellData.effectiveValue;
+      
+      // Check if effectiveValue contains any image-related data
+      if (typeof effectiveValue === 'string') {
+        const driveImageMatch = this.extractDriveImageFromValue(effectiveValue);
+        if (driveImageMatch) {
+          return driveImageMatch;
+        }
+      }
+    }
+
+    // Check formattedValue for image references
+    if (cellData.formattedValue && typeof cellData.formattedValue === 'string') {
+      const driveImageMatch = this.extractDriveImageFromValue(cellData.formattedValue);
+      if (driveImageMatch) {
+        return driveImageMatch;
+      }
+    }
+
+    // Check textFormatRuns for any embedded content that might indicate images
+    if (cellData.textFormatRuns && Array.isArray(cellData.textFormatRuns)) {
+      for (const run of cellData.textFormatRuns) {
+        if (run.format && run.format.link && run.format.link.uri) {
+          const driveImageMatch = this.extractDriveImageFromValue(run.format.link.uri);
+          if (driveImageMatch) {
+            return driveImageMatch;
+          }
+        }
+      }
+    }
+
+    // Unfortunately, directly embedded images (like the ones in your screenshot)
+    // might not be accessible through the Sheets API in a straightforward way
+    // They might be stored as drawing objects which require different API calls
+    
+    return null;
+  }
+
+  private extractDriveImageFromValue(value: string): { url: string; id: string } | null {
+    // Check for various Google Drive URL patterns that might appear in cell values
+    const drivePatterns = [
+      // Standard Drive file URLs
+      /https?:\/\/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/,
+      // Drive sharing URLs
+      /https?:\/\/drive\.google\.com\/open\?id=([a-zA-Z0-9_-]+)/,
+      // Direct file access URLs
+      /https?:\/\/drive\.google\.com\/uc\?.*?id=([a-zA-Z0-9_-]+)/,
+      // Alternative Drive URLs
+      /https?:\/\/docs\.google\.com\/.*?\/d\/([a-zA-Z0-9_-]+)/,
+      // Shortened Drive URLs
+      /https?:\/\/drive\.google\.com\/([a-zA-Z0-9_-]+)/
+    ];
+
+    for (const pattern of drivePatterns) {
+      const match = value.match(pattern);
+      if (match && match[1]) {
+        const driveId = match[1];
+        
+        // Create a download URL for the image
+        return {
+          url: `https://drive.google.com/uc?export=download&id=${driveId}`,
+          id: driveId
+        };
+      }
+    }
+
+    // Also check for raw Drive file IDs (sometimes sheets contain just the ID)
+    // This pattern matches standalone Google Drive IDs (33-34 characters)
+    if (/^[a-zA-Z0-9_-]{33,34}$/.test(value.trim())) {
+      const driveId = value.trim();
+      return {
+        url: `https://drive.google.com/uc?export=download&id=${driveId}`,
+        id: driveId
+      };
+    }
+
+    return null;
   }
 }
 
