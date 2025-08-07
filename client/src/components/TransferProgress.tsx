@@ -467,7 +467,7 @@ function TransferProgress({ jobId }: TransferProgressProps) {
                 </div>
                 <p className="text-xl font-bold text-purple-900">
                   {job.progress.successfulImages || 0}
-                  {job.progress.fallbackImages && job.progress.fallbackImages > 0 && (
+                  {((job.progress.fallbackImages || 0) > 0) && (
                     <span className="text-sm text-orange-600 ml-1">
                       +{job.progress.fallbackImages} links
                     </span>

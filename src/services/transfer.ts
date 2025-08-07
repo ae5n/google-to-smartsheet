@@ -325,14 +325,17 @@ export class TransferService {
     let fallbackImages = 0;
     let failedImages = 0;
 
-    // Count total rows and images first
+    // Count total rows and images first (only from selected columns)
     for (const [tabName, tabData] of Object.entries(googleData)) {
       if (tabData.length > 1) {
         totalRows += tabData.length - 1; // Exclude header
       }
+      // Count images only from selected columns
       for (const row of tabData) {
-        for (const cell of row) {
-          if (cell.isImage) totalImages++;
+        for (const mapping of job.columnMappings) {
+          const googleColumnIndex = mapping.googleColumnIndex !== undefined ? mapping.googleColumnIndex : job.columnMappings.indexOf(mapping);
+          const cell = row[googleColumnIndex];
+          if (cell && cell.isImage) totalImages++;
         }
       }
     }
@@ -397,9 +400,11 @@ export class TransferService {
 
             smartsheetRows.push({ cells: smartsheetCells });
 
-            // Update image progress
-            for (const cell of googleRow) {
-              if (cell.isImage) {
+            // Update image progress (only from selected columns)
+            for (const mapping of job.columnMappings) {
+              const googleColumnIndex = mapping.googleColumnIndex !== undefined ? mapping.googleColumnIndex : job.columnMappings.indexOf(mapping);
+              const cell = googleRow[googleColumnIndex];
+              if (cell && cell.isImage) {
                 processedImages++;
               }
             }
