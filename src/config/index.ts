@@ -52,6 +52,17 @@ export const config = {
     nodeEnv: process.env.NODE_ENV || 'development',
     baseUrl: process.env.BASE_URL || 'http://localhost:3001',
     clientUrl: process.env.CLIENT_URL || 'http://localhost:3000',
+    /**
+     * Number of reverse proxies in front of this app, or 'loopback'.
+     * Set TRUST_PROXY=1 behind a single nginx/ALB, 2 behind Cloudflare+nginx.
+     * Never set it higher than the real hop count: each extra hop lets a
+     * client forge one more X-Forwarded-For entry.
+     */
+    trustProxy: process.env.TRUST_PROXY
+      ? (Number.isNaN(Number(process.env.TRUST_PROXY))
+          ? process.env.TRUST_PROXY
+          : Number(process.env.TRUST_PROXY))
+      : 'loopback',
   },
   
   database: {
