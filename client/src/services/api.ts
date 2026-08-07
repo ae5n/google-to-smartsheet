@@ -4,8 +4,8 @@ import {
   User, 
   GoogleSheet, 
   SmartsheetSheet, 
-  TransferJob, 
-  DryRunResult 
+  TransferJob,
+  DryRunResult
 } from '../types';
 
 const API_BASE_URL = process.env.NODE_ENV === 'production' 
@@ -18,25 +18,79 @@ const api = axios.create({
   timeout: 60000,
 });
 
-// Add CSRF token and ensure proper headers for requests
+/**
+ * The CSRF token is per-session and stable, so it is fetched once and cached.
+ * Fetching it before every mutating call doubled our request count against the
+ * server's rate limiter. In-flight fetches are shared so a burst of parallel
+ * writes triggers exactly one token request.
+ */
+let csrfToken: string | null = null;
+let csrfInFlight: Promise<string | null> | null = null;
+
+const getCsrfToken = async (force = false): Promise<string | null> => {
+  if (csrfToken && !force) return csrfToken;
+  if (csrfInFlight) return csrfInFlight;
+
+  csrfInFlight = axios
+    .get('/api/csrf-token', { withCredentials: true })
+    .then(response => {
+      csrfToken = response.data.csrfToken ?? null;
+      return csrfToken;
+    })
+    .catch(error => {
+      console.warn('Failed to get CSRF token:', error);
+      return null;
+    })
+    .finally(() => {
+      csrfInFlight = null;
+    });
+
+  return csrfInFlight;
+};
+
 api.interceptors.request.use(async (config) => {
   if (['post', 'put', 'patch', 'delete'].includes(config.method?.toLowerCase() || '')) {
-    // Ensure Content-Type is set for POST requests
     if (!config.headers['Content-Type']) {
       config.headers['Content-Type'] = 'application/json';
     }
-    
-    try {
-      const response = await axios.get('/api/csrf-token', {
-        withCredentials: true
-      });
-      config.headers['X-CSRF-Token'] = response.data.csrfToken;
-    } catch (error) {
-      console.warn('Failed to get CSRF token:', error);
+
+    const token = await getCsrfToken();
+    if (token) {
+      config.headers['X-CSRF-Token'] = token;
     }
   }
   return config;
 });
+
+api.interceptors.response.use(
+  response => response,
+  async (error) => {
+    const original = error.config;
+
+    // A rotated session invalidates the cached token — refresh once and retry.
+    if (
+      error.response?.status === 403 &&
+      error.response?.data?.code === 'CSRF_INVALID' &&
+      original &&
+      !original.__csrfRetried
+    ) {
+      original.__csrfRetried = true;
+      const token = await getCsrfToken(true);
+      if (token) {
+        original.headers['X-CSRF-Token'] = token;
+        return api.request(original);
+      }
+    }
+
+    // Surface the server's backoff hint so callers can wait it out.
+    if (error.response?.status === 429) {
+      const retryAfter = Number(error.response.headers?.['retry-after']);
+      error.retryAfterMs = Number.isFinite(retryAfter) ? retryAfter * 1000 : 30_000;
+    }
+
+    return Promise.reject(error);
+  }
+);
 
 // Auth API
 export const authAPI = {

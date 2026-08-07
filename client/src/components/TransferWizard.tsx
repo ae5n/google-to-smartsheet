@@ -43,7 +43,6 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
   const [selectedColumns, setSelectedColumns] = useState<number[]>([]);
 
   // Column mapping
-  const [columnMappings, setColumnMappings] = useState<ColumnMapping[]>([]);
   const [googleHeaders, setGoogleHeaders] = useState<string[]>([]);
 
   // Row statistics
@@ -74,12 +73,6 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
       loadExistingSheets(selectedFolder.id);
     }
   }, [selectedFolder, targetOption]);
-
-  useEffect(() => {
-    if (currentStep === 'preview') {
-      loadRowStatistics();
-    }
-  }, [currentStep, selectedSpreadsheet, selectedTab, selectedHeaderRow]);
 
   const loadGoogleSheets = async () => {
     try {
@@ -221,27 +214,6 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
     } catch (error) {
       console.error('Error loading header preview:', error);
       toast.error('Failed to load header preview');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadGoogleHeaders = async () => {
-    if (!selectedSpreadsheet || !selectedTab) return;
-
-    try {
-      setLoading(true);
-      const response = await googleAPI.getSpreadsheetHeaders(selectedSpreadsheet.spreadsheetId, selectedTab);
-      if (response.data.success) {
-        const headers = response.data.data || [];
-        setGoogleHeaders(headers);
-      } else {
-        console.error('Failed to load headers:', response.data.error);
-        toast.error('Failed to load spreadsheet headers');
-      }
-    } catch (error) {
-      console.error('Error loading headers:', error);
-      toast.error('Failed to load spreadsheet headers');
     } finally {
       setLoading(false);
     }
@@ -443,19 +415,6 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
         setCreatedSheet(targetSheet);
         
         
-        // Create temporary column mappings based on selected columns (backend will fix with real IDs)
-        const tempMappings: ColumnMapping[] = selectedHeaders
-          .map((header, index) => {
-            const cleanHeader = header?.trim() || `Column ${selectedColumns[index] + 1}`;
-            return {
-              googleColumn: cleanHeader,
-              smartsheetColumnId: index + 1, // Temporary - backend will fix
-              dataType: 'text' as const,
-              googleColumnIndex: selectedColumns[index] // Add original column index for backend
-            };
-          });
-
-        setColumnMappings(tempMappings);
         toast.success('Smartsheet created successfully');
       } else {
         if (!selectedExistingSheet) {
@@ -464,24 +423,6 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
         }
         targetSheet = selectedExistingSheet;
         
-        // Create temporary column mappings for existing sheet based on selected columns (backend will fix with real IDs)
-        const selectedHeaders = selectedColumns.map(colIndex => {
-          const originalHeaders = headerPreview?.rows[selectedHeaderRow] || [];
-          return originalHeaders[colIndex] || `Column ${colIndex + 1}`;
-        });
-        
-        const tempMappings: ColumnMapping[] = selectedHeaders
-          .map((header, index) => {
-            const cleanHeader = header?.trim() || `Column ${selectedColumns[index] + 1}`;
-            return {
-              googleColumn: cleanHeader,
-              smartsheetColumnId: index + 1, // Temporary - backend will fix
-              dataType: 'text' as const,
-              googleColumnIndex: selectedColumns[index] // Add original column index for backend
-            };
-          });
-
-        setColumnMappings(tempMappings);
       }
 
       setExecutionStep('Creating transfer job...');

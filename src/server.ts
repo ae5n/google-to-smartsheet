@@ -9,16 +9,16 @@ import path from 'path';
 import fs from 'fs';
 
 import config from './config';
-import { ensureSSLCertificates } from './utils/ssl';
-import { 
-  securityMiddleware, 
-  rateLimiter, 
-  pollingRateLimiter,
-  generateCSRFToken, 
-  validateContentType 
+import {
+  securityMiddleware,
+  readRateLimiter,
+  writeRateLimiter,
+  deviceIdentity,
+  generateCSRFToken,
+  validateContentType
 } from './middleware/security';
 import { requestLogger, errorLogger } from './middleware/logging';
-import { initializeDatabase } from './database';
+import database, { initializeDatabase } from './database';
 import authRoutes from './routes/auth';
 import googleRoutes from './routes/google';
 import smartsheetRoutes from './routes/smartsheet';
@@ -31,9 +31,23 @@ class Server {
   private httpServer?: http.Server;
   private httpsServer?: https.Server;
   private io?: SocketIOServer;
+  /** Shared with Socket.IO so sockets can authenticate as the logged-in user. */
+  private sessionMiddleware: express.RequestHandler;
 
   constructor() {
     this.app = express();
+    this.sessionMiddleware = session({
+      secret: config.session.secret,
+      resave: false,
+      saveUninitialized: false,
+      cookie: {
+        secure: config.server.nodeEnv === 'production',
+        httpOnly: true,
+        maxAge: config.session.maxAge,
+        sameSite: 'lax' // 'lax' so OAuth redirects keep the session
+      },
+      name: 'gts.sid'
+    });
     this.setupMiddleware();
     this.setupRoutes();
     this.setupErrorHandling();
@@ -41,26 +55,65 @@ class Server {
 
   private setupWebSocket(): void {
     if (!this.httpServer) return;
-    
+
     this.io = new SocketIOServer(this.httpServer, {
       cors: {
         origin: [config.server.clientUrl, 'http://localhost:3000'],
         credentials: true
+      },
+      // Long-lived jobs mean idle stretches; keep the connection alive rather
+      // than letting it drop and fall back to polling.
+      pingInterval: 25000,
+      pingTimeout: 60000,
+      connectionStateRecovery: {
+        maxDisconnectionDuration: 2 * 60 * 1000,
+        skipMiddlewares: false
       }
     });
 
+    // Reuse the Express session so socket connections carry the same identity.
+    this.io.engine.use(this.sessionMiddleware);
+
+    this.io.use((socket, next) => {
+      const request = socket.request as any;
+      const user = request.session?.user;
+
+      if (!user?.id) {
+        // Logged so a misconfigured session never fails silently: without this,
+        // a broken session would just look like "live updates unavailable".
+        console.warn(
+          `🔌 Socket rejected — ${
+            request.session ? 'no authenticated user in session' : 'session not readable on socket'
+          }`
+        );
+        return next(new Error('unauthorized'));
+      }
+      (socket.data as any).userId = user.id;
+      next();
+    });
+
     this.io.on('connection', (socket) => {
-      // Join room for specific job updates
-      socket.on('join-job', (jobId: string) => {
-        socket.join(`job-${jobId}`);
+      const userId = (socket.data as any).userId as string;
+
+      // Rooms are namespaced by user, so a job's updates can only ever reach
+      // the account that owns it. Previously any client could join any room
+      // by guessing a job id and receive that job's full payload.
+      socket.on('join-job', async (jobId: string, ack?: (result: any) => void) => {
+        try {
+          const job = await database.getTransferJobById(jobId);
+          if (!job || job.userId !== userId) {
+            ack?.({ ok: false, error: 'Job not found' });
+            return;
+          }
+          await socket.join(`job-${jobId}`);
+          ack?.({ ok: true });
+        } catch (error: any) {
+          ack?.({ ok: false, error: error.message });
+        }
       });
-      
+
       socket.on('leave-job', (jobId: string) => {
-        socket.leave(`job-${jobId}`);
-      });
-      
-      socket.on('disconnect', () => {
-        // Client disconnected
+        void socket.leave(`job-${jobId}`);
       });
     });
   }
@@ -70,14 +123,13 @@ class Server {
   }
 
   private setupMiddleware(): void {
-    // Enable trust proxy for development (fixes rate limiter proxy header issues)
-    this.app.set('trust proxy', true);
-    
+    // Only trust as many proxy hops as actually exist. `true` would let any
+    // client spoof X-Forwarded-For and impersonate another IP.
+    this.app.set('trust proxy', config.server.trustProxy);
+
     this.app.use(securityMiddleware);
-    this.app.use(rateLimiter);
-    this.app.use(pollingRateLimiter);
     this.app.use(requestLogger);
-    
+
     this.app.use(cors({
       origin: [config.server.clientUrl, 'http://localhost:3000'],
       credentials: true,
@@ -87,24 +139,19 @@ class Server {
     this.app.use(express.json({ limit: '10mb' }));
     this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
     this.app.use(cookieParser());
-    
+
     const dataDir = path.dirname(config.database.path);
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });
     }
 
-    this.app.use(session({
-      secret: config.session.secret,
-      resave: false,
-      saveUninitialized: false,
-      cookie: {
-        secure: config.server.nodeEnv === 'production',
-        httpOnly: true,
-        maxAge: config.session.maxAge,
-        sameSite: 'lax' // Changed to 'lax' for OAuth redirects
-      },
-      name: 'gts.sid'
-    }));
+    this.app.use(this.sessionMiddleware);
+
+    // Rate limiters run *after* cookies and session so they can key on the
+    // authenticated user or signed device id rather than a shared IP.
+    this.app.use(deviceIdentity);
+    this.app.use(readRateLimiter);
+    this.app.use(writeRateLimiter);
 
     this.app.use(generateCSRFToken);
     this.app.use(validateContentType);

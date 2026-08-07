@@ -16,15 +16,29 @@ interface LogEntry {
 
 class Logger {
   private logDir: string;
+  private readonly writeFiles: boolean;
 
   constructor() {
     this.logDir = path.resolve('./logs');
-    if (!fs.existsSync(this.logDir)) {
+    this.writeFiles = process.env.NODE_ENV !== 'production';
+    if (this.writeFiles && !fs.existsSync(this.logDir)) {
       fs.mkdirSync(this.logDir, { recursive: true });
     }
   }
 
   private writeLog(filename: string, entry: LogEntry): void {
+    const line = JSON.stringify({ event: filename.split('-')[0], ...entry });
+
+    // Render captures stdout/stderr, while its ephemeral filesystem is not a
+    // durable or searchable log sink. Keep local files only for development.
+    if (entry.error || (entry.statusCode ?? 0) >= 400) {
+      console.warn(line);
+    } else {
+      console.log(line);
+    }
+
+    if (!this.writeFiles) return;
+
     const logPath = path.join(this.logDir, filename);
     const logLine = JSON.stringify(entry) + '\n';
     
