@@ -1,7 +1,11 @@
 import * as dotenv from 'dotenv';
-import path from 'path';
 
 dotenv.config();
+
+const nonNegativeInt = (value: string | undefined, fallback: number): number => {
+  const parsed = Number.parseInt(value || '', 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+};
 
 // Validate required environment variables
 function validateRequiredEnvVars() {
@@ -11,7 +15,8 @@ function validateRequiredEnvVars() {
     'SMARTSHEET_CLIENT_ID',
     'SMARTSHEET_CLIENT_SECRET',
     'SESSION_SECRET',
-    'ENCRYPTION_KEY'
+    'ENCRYPTION_KEY',
+    'DATABASE_URL'
   ];
 
   const missing = required.filter(key => !process.env[key] || process.env[key]?.trim() === '');
@@ -66,7 +71,18 @@ export const config = {
   },
   
   database: {
-    path: process.env.DATABASE_PATH || './data/app.db',
+    /** Postgres connection string, e.g. the pooled URL Neon gives you. */
+    url: process.env.DATABASE_URL || '',
+    poolSize: Math.max(1, nonNegativeInt(process.env.DATABASE_POOL_SIZE, 10)),
+    /** A running transfer with no persisted progress for this long is treated
+     * as interrupted. It is never replayed automatically because Smartsheet
+     * inserts are not safely idempotent. */
+    staleTransferMinutes: nonNegativeInt(process.env.STALE_TRANSFER_MINUTES, 15),
+    /** Optional terminal-job retention. Zero preserves history indefinitely. */
+    transferHistoryRetentionDays: nonNegativeInt(
+      process.env.TRANSFER_HISTORY_RETENTION_DAYS,
+      0
+    ),
     encryptionKey: process.env.ENCRYPTION_KEY!,
   },
   

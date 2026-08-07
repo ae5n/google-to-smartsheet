@@ -11,14 +11,15 @@ import {
   XCircleIcon,
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline';
-import clsx from 'clsx';
 
 function HistoryPage() {
   const { user } = useAuth();
   const [jobs, setJobs] = useState<TransferJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'completed' | 'failed' | 'running' | 'pending'>('all');
+  const [statusFilter, setStatusFilter] = useState<
+    'all' | 'completed' | 'completed_with_errors' | 'failed' | 'running' | 'pending'
+  >('all');
 
   useEffect(() => {
     const fetchJobs = async () => {
@@ -43,6 +44,8 @@ function HistoryPage() {
     switch (status) {
       case 'completed':
         return <CheckCircleIcon className="h-5 w-5 text-green-500" />;
+      case 'completed_with_errors':
+        return <ExclamationTriangleIcon className="h-5 w-5 text-orange-500" />;
       case 'failed':
       case 'cancelled':
         return <XCircleIcon className="h-5 w-5 text-red-500" />;
@@ -57,6 +60,8 @@ function HistoryPage() {
     switch (status) {
       case 'completed':
         return 'Completed';
+      case 'completed_with_errors':
+        return 'Completed with errors';
       case 'failed':
         return 'Failed';
       case 'cancelled':
@@ -72,6 +77,8 @@ function HistoryPage() {
     switch (status) {
       case 'completed':
         return 'bg-green-100 text-green-800 border-green-200';
+      case 'completed_with_errors':
+        return 'bg-orange-100 text-orange-800 border-orange-200';
       case 'failed':
       case 'cancelled':
         return 'bg-red-100 text-red-800 border-red-200';
@@ -161,6 +168,7 @@ function HistoryPage() {
               >
                 <option value="all">All Status</option>
                 <option value="completed">Completed</option>
+                <option value="completed_with_errors">Completed with errors</option>
                 <option value="running">Running</option>
                 <option value="failed">Failed</option>
                 <option value="pending">Pending</option>

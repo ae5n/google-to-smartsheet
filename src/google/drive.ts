@@ -109,7 +109,12 @@ export class GoogleDriveService {
       );
 
       const buffer = Buffer.from(response.data);
-      const mimeType = response.headers['content-type'] || 'image/jpeg';
+      const contentType = response.headers['content-type'];
+      const mimeType = Array.isArray(contentType)
+        ? contentType[0] || 'image/jpeg'
+        : typeof contentType === 'string'
+          ? contentType
+          : 'image/jpeg';
       
       // Extract filename from URL or use default
       const urlPath = new URL(imageUrl).pathname;
