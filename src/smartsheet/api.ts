@@ -1,15 +1,32 @@
-import axios, { AxiosResponse } from 'axios';
+import axios from 'axios';
 import FormData from 'form-data';
 import { smartsheetAuthService } from '../auth/smartsheet';
 import { encryptionService } from '../utils/encryption';
 import database from '../database';
-import { 
-  SmartsheetSheet, 
-  SmartsheetColumn, 
-  SmartsheetCellValue, 
-  EncryptedTokens,
-  ImageCache
+import { describeApiError, smartsheetBucket, throttled } from '../utils/rateLimiter';
+import {
+  SmartsheetSheet,
+  SmartsheetColumn,
+  SmartsheetCellValue,
+  EncryptedTokens
 } from '../types';
+
+/** Outcome for one row of an `addRowsToSheet` call, aligned to the input array. */
+export interface AddRowsResult {
+  index: number;
+  inserted?: boolean;
+  rowId?: number;
+  rowNumber?: number;
+  error?: string;
+  status?: number;
+}
+
+export interface AddRowsOutcome {
+  success: number;
+  failed: number;
+  results: AddRowsResult[];
+  errors: Array<{ row: number; error: string }>;
+}
 
 export class SmartsheetAPIService {
   private readonly baseUrl = 'https://api.smartsheet.com/2.0';
@@ -279,19 +296,25 @@ export class SmartsheetAPIService {
     try {
       const tokens = encryptionService.decryptTokens(encryptedTokens.encryptedData);
 
-      const response = await axios.post(
-        `${this.baseUrl}/sheets/${sheetId}/rows/${rowId}/columns/${columnId}/cellimages`,
-        imageBuffer,
-        {
-          headers: {
-            'Authorization': `Bearer ${tokens.accessToken}`,
-            'Content-Type': mimeType,
-            'Content-Disposition': `attachment; filename="${filename}"`,
-            'Content-Length': imageBuffer.length.toString()
-          },
-          maxContentLength: 10 * 1024 * 1024, // 10MB limit
-          timeout: 60000 // 60 seconds timeout
-        }
+      const response = await throttled(
+        smartsheetBucket,
+        () =>
+          axios.post(
+            `${this.baseUrl}/sheets/${sheetId}/rows/${rowId}/columns/${columnId}/cellimages`,
+            imageBuffer,
+            {
+              headers: {
+                'Authorization': `Bearer ${tokens.accessToken}`,
+                'Content-Type': mimeType,
+                'Content-Disposition': `attachment; filename="${filename}"`,
+                'Content-Length': imageBuffer.length.toString()
+              },
+              maxContentLength: 10 * 1024 * 1024, // 10MB limit
+              timeout: 60000 // 60 seconds timeout
+            }
+          ),
+        // Re-uploading the same cell image overwrites it, so a replay is safe.
+        { label: 'smartsheet cellimages', maxAttempts: 4 }
       );
 
       return response.data.id;
@@ -329,14 +352,19 @@ export class SmartsheetAPIService {
         contentType: mimeType
       });
 
-      const response = await axios.post(`${this.baseUrl}/images`, formData, {
-        headers: {
-          ...formData.getHeaders(),
-          'Authorization': `Bearer ${tokens.accessToken}`
-        },
-        maxContentLength: 10 * 1024 * 1024, // 10MB limit
-        timeout: 60000 // 60 seconds timeout
-      });
+      const response = await throttled(
+        smartsheetBucket,
+        () =>
+          axios.post(`${this.baseUrl}/images`, formData, {
+            headers: {
+              ...formData.getHeaders(),
+              'Authorization': `Bearer ${tokens.accessToken}`
+            },
+            maxContentLength: 10 * 1024 * 1024, // 10MB limit
+            timeout: 60000 // 60 seconds timeout
+          }),
+        { label: 'smartsheet image upload', maxAttempts: 4 }
+      );
 
       const imageId = response.data.id;
       
@@ -355,6 +383,15 @@ export class SmartsheetAPIService {
     }
   }
 
+  /**
+   * Inserts rows and reports the outcome of **every input row individually**.
+   *
+   * Smartsheet's POST /rows is all-or-nothing per request, so when a chunk
+   * fails we bisect it and retry the halves. A single malformed row therefore
+   * costs one row, not the whole chunk — and the returned `results` array is
+   * positionally aligned to `rows`, which is what lets the caller attach
+   * images to the correct target rows and record an accurate ledger.
+   */
   public async addRowsToSheet(
     encryptedTokens: EncryptedTokens,
     sheetId: number,
@@ -363,64 +400,85 @@ export class SmartsheetAPIService {
       toTop?: boolean;
       toBottom?: boolean;
     }>
-  ): Promise<{ success: number; failed: number; errors: Array<{ row: number; error: string }>; result?: any[] }> {
-    try {
-      const batchSize = 100; // Smartsheet API limit
-      let totalSuccess = 0;
-      let totalFailed = 0;
-      const allErrors: Array<{ row: number; error: string }> = [];
-      let allInsertedRows: any[] = [];
+  ): Promise<AddRowsOutcome> {
+    const results: AddRowsResult[] = rows.map((_, index) => ({ index }));
 
-      for (let i = 0; i < rows.length; i += batchSize) {
-        const batch = rows.slice(i, i + batchSize);
-        
-        try {
-          const response = await smartsheetAuthService.makeAuthenticatedRequest(
-            encryptedTokens,
-            'POST',
-            `/sheets/${sheetId}/rows`,
-            batch.map(row => ({
-              cells: row.cells,
-              toBottom: row.toBottom !== false // Default to bottom
-            }))
-          );
+    // Indices into `rows`, carried through the bisection so every outcome
+    // lands back on the row it belongs to.
+    const insertChunk = async (indices: number[]): Promise<void> => {
+      if (indices.length === 0) return;
 
-          const result = response.result || response;
-          if (Array.isArray(result)) {
-            totalSuccess += result.length;
-            allInsertedRows = allInsertedRows.concat(result);
-          } else {
-            totalSuccess += batch.length;
-          }
-        } catch (error: any) {
-          totalFailed += batch.length;
-          
-          // Enhanced error logging for 400 errors
-          console.error(`❌ Smartsheet row insertion failed:`, {
-            status: error.response?.status,
-            statusText: error.response?.statusText,
-            errorResponse: error.response?.data
+      try {
+        const response = await smartsheetAuthService.makeAuthenticatedRequest(
+          encryptedTokens,
+          'POST',
+          `/sheets/${sheetId}/rows`,
+          indices.map(i => ({
+            cells: rows[i].cells,
+            toBottom: rows[i].toBottom !== false // Default to bottom
+          }))
+        );
+
+        const inserted = response?.result ?? response;
+
+        if (Array.isArray(inserted) && inserted.length === indices.length) {
+          indices.forEach((rowIdx, position) => {
+            results[rowIdx].rowId = inserted[position]?.id;
+            results[rowIdx].rowNumber = inserted[position]?.rowNumber;
+            results[rowIdx].inserted = true;
           });
-          
-          // Log individual row errors
-          for (let j = 0; j < batch.length; j++) {
-            allErrors.push({
-              row: i + j,
-              error: error.message || 'Failed to insert row'
-            });
-          }
+          return;
         }
-      }
 
-      return {
-        success: totalSuccess,
-        failed: totalFailed,
-        errors: allErrors,
-        result: allInsertedRows
-      };
-    } catch (error: any) {
-      throw new Error(`Failed to add rows: ${error.message}`);
+        // Smartsheet returned a shape we cannot align to our input. The rows
+        // may well exist, but we cannot prove which — never claim success we
+        // cannot substantiate.
+        indices.forEach(rowIdx => {
+          results[rowIdx].inserted = false;
+          results[rowIdx].error =
+            'Insert returned an unrecognised response; row state could not be confirmed';
+        });
+      } catch (error: any) {
+        const { status, message } = describeApiError(error);
+
+        // Bisect to isolate the offending row(s).
+        if (indices.length > 1) {
+          const mid = Math.floor(indices.length / 2);
+          await insertChunk(indices.slice(0, mid));
+          await insertChunk(indices.slice(mid));
+          return;
+        }
+
+        const rowIdx = indices[0];
+        results[rowIdx].inserted = false;
+        results[rowIdx].error = status ? `HTTP ${status}: ${message}` : message;
+        results[rowIdx].status = status;
+
+        console.error(
+          `❌ Smartsheet row insert failed (input row ${rowIdx}): ${results[rowIdx].error}`
+        );
+      }
+    };
+
+    const batchSize = 100; // Smartsheet API limit per request
+    for (let i = 0; i < rows.length; i += batchSize) {
+      const indices = Array.from(
+        { length: Math.min(batchSize, rows.length - i) },
+        (_, k) => i + k
+      );
+      await insertChunk(indices);
     }
+
+    const success = results.filter(r => r.inserted).length;
+
+    return {
+      success,
+      failed: results.length - success,
+      results,
+      errors: results
+        .filter(r => !r.inserted)
+        .map(r => ({ row: r.index, error: r.error || 'Failed to insert row' }))
+    };
   }
 
   public async addRowWithRetry(
@@ -477,17 +535,19 @@ export class SmartsheetAPIService {
         contentType: mimeType
       });
 
-      const response = await axios.post(
-        `${this.baseUrl}/sheets/${sheetId}/attachments`,
-        formData,
-        {
-          headers: {
-            ...formData.getHeaders(),
-            'Authorization': `Bearer ${tokens.accessToken}`
-          },
-          maxContentLength: 10 * 1024 * 1024,
-          timeout: 60000
-        }
+      const response = await throttled(
+        smartsheetBucket,
+        () =>
+          axios.post(`${this.baseUrl}/sheets/${sheetId}/attachments`, formData, {
+            headers: {
+              ...formData.getHeaders(),
+              'Authorization': `Bearer ${tokens.accessToken}`
+            },
+            maxContentLength: 10 * 1024 * 1024,
+            timeout: 60000
+          }),
+        // Non-idempotent: a replayed attachment would duplicate the file.
+        { label: 'smartsheet attachment', idempotent: false }
       );
 
       return response.data.id;

@@ -166,7 +166,7 @@ export class GoogleAuthService {
       expiry_date: tokens.expiryDate
     });
 
-    oauth2Client.on('tokens', (newTokens) => {
+    oauth2Client.on('tokens', () => {
       console.log('Google tokens refreshed automatically');
     });
 

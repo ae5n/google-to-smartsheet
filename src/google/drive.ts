@@ -1,7 +1,7 @@
 import { google } from 'googleapis';
 import axios from 'axios';
 import { googleAuthService } from '../auth/google';
-import { encryptionService } from '../utils/encryption';
+import { googleBucket, imageGate, throttled } from '../utils/rateLimiter';
 import { EncryptedTokens } from '../types';
 
 export class GoogleDriveService {
@@ -39,25 +39,35 @@ export class GoogleDriveService {
 
     try {
       // Get file metadata first
-      const metadataResponse = await driveClient.files.get({
-        fileId,
-        fields: 'name,mimeType,size'
-      });
+      const metadataResponse = await throttled(
+        googleBucket,
+        () =>
+          driveClient.files.get({
+            fileId,
+            fields: 'name,mimeType,size'
+          }),
+        { label: 'drive.files.get metadata' }
+      );
 
       const { name, mimeType, size } = metadataResponse.data;
-      
+
       // Check file size (limit to 10MB)
       if (size && parseInt(size) > 10 * 1024 * 1024) {
         throw new Error('Image file too large (max 10MB)');
       }
 
       // Download file content
-      const response = await driveClient.files.get({
-        fileId,
-        alt: 'media'
-      }, {
-        responseType: 'arraybuffer'
-      });
+      const response = await throttled(
+        googleBucket,
+        () =>
+          driveClient.files.get({
+            fileId,
+            alt: 'media'
+          }, {
+            responseType: 'arraybuffer'
+          }),
+        { label: 'drive.files.get media' }
+      );
 
       const buffer = Buffer.from(response.data as ArrayBuffer);
       
@@ -84,14 +94,19 @@ export class GoogleDriveService {
       // Fix malformed Google Drive URLs
       const fixedUrl = imageUrl.replace('export=&id=', 'export=download&id=');
       
-      const response = await axios.get(fixedUrl, {
-        responseType: 'arraybuffer',
-        timeout: 30000, // 30 seconds timeout
-        maxContentLength: 10 * 1024 * 1024, // 10MB limit
-        headers: {
-          'User-Agent': 'Google-Smartsheet-Transfer/1.0'
-        }
-      });
+      const response = await throttled(
+        googleBucket,
+        () =>
+          axios.get(fixedUrl, {
+            responseType: 'arraybuffer',
+            timeout: 30000, // 30 seconds timeout
+            maxContentLength: 10 * 1024 * 1024, // 10MB limit
+            headers: {
+              'User-Agent': 'Google-Smartsheet-Transfer/1.0'
+            }
+          }),
+        { label: 'drive direct download' }
+      );
 
       const buffer = Buffer.from(response.data);
       const mimeType = response.headers['content-type'] || 'image/jpeg';
@@ -129,17 +144,27 @@ export class GoogleDriveService {
         const oauth2Client = googleAuthService.createOAuth2Client(encryptedTokens);
         const driveClient = google.drive({ version: 'v3', auth: oauth2Client });
 
-        await driveClient.files.get({
-          fileId: driveFileId,
-          fields: 'id'
-        });
+        await throttled(
+          googleBucket,
+          () =>
+            driveClient.files.get({
+              fileId: driveFileId,
+              fields: 'id'
+            }),
+          { label: 'drive validate', maxAttempts: 3 }
+        );
       } else {
-        await axios.head(imageUrl, {
-          timeout: 10000,
-          headers: {
-            'User-Agent': 'Google-Smartsheet-Transfer/1.0'
-          }
-        });
+        await throttled(
+          googleBucket,
+          () =>
+            axios.head(imageUrl, {
+              timeout: 10000,
+              headers: {
+                'User-Agent': 'Google-Smartsheet-Transfer/1.0'
+              }
+            }),
+          { label: 'url validate', maxAttempts: 3 }
+        );
       }
 
       return { accessible: true };
@@ -167,20 +192,22 @@ export class GoogleDriveService {
     encryptedTokens: EncryptedTokens,
     images: Array<{ url: string; driveFileId?: string }>
   ): Promise<Array<{ url: string; accessible: boolean; error?: string }>> {
+    // Gated: validating 50 images used to fire 50 simultaneous Drive calls,
+    // which is a quota violation on its own before the transfer even starts.
     const results = await Promise.allSettled(
-      images.map(async (image) => {
+      images.map((image) => imageGate.run(async () => {
         const validation = await this.validateImageAccess(
           encryptedTokens,
           image.url,
           image.driveFileId
         );
-        
+
         return {
           url: image.url,
           accessible: validation.accessible,
           error: validation.error
         };
-      })
+      }))
     );
 
     return results.map((result, index) => {

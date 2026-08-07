@@ -17,6 +17,7 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
   const [googleSheets, setGoogleSheets] = useState<GoogleSheet[]>([]);
   const [selectedSpreadsheet, setSelectedSpreadsheet] = useState<GoogleSheet | null>(null);
   const [selectedTab, setSelectedTab] = useState<string>('');
+  const [tabsLoading, setTabsLoading] = useState(false);
 
   // Smartsheet data  
   const [workspaces, setWorkspaces] = useState<SmartsheetWorkspace[]>([]);
@@ -94,6 +95,37 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
       console.error('Error loading Google sheets:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  /**
+   * Tabs are fetched on selection rather than for every spreadsheet up front —
+   * the eager version cost one Google API call per spreadsheet just to render
+   * this list, which alone could exhaust the per-user read quota.
+   */
+  const selectSpreadsheet = async (sheet: GoogleSheet) => {
+    setSelectedSpreadsheet(sheet);
+
+    if (sheet.sheets.length > 0) return; // already loaded
+
+    try {
+      setTabsLoading(true);
+      const response = await googleAPI.getSpreadsheetTabs(sheet.spreadsheetId);
+      if (response.data.success) {
+        const tabs = response.data.data || [];
+        const withTabs = { ...sheet, sheets: tabs };
+        setSelectedSpreadsheet(withTabs);
+        setGoogleSheets(prev =>
+          prev.map(s => (s.spreadsheetId === sheet.spreadsheetId ? withTabs : s))
+        );
+      } else {
+        toast.error('Failed to load sheet tabs');
+      }
+    } catch (error) {
+      toast.error('Failed to load sheet tabs');
+      console.error('Error loading tabs:', error);
+    } finally {
+      setTabsLoading(false);
     }
   };
 
@@ -740,12 +772,14 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
                     : 'border-gray-200'
                 }`}
                 onClick={() => {
-                  setSelectedSpreadsheet(sheet);
                   setSelectedTab(''); // Reset tab selection when spreadsheet changes
+                  void selectSpreadsheet(sheet);
                 }}
               >
                 <div className="font-medium">{sheet.title}</div>
-                <div className="text-sm text-gray-500">{sheet.sheets.length} tabs</div>
+                {sheet.sheets.length > 0 && (
+                  <div className="text-sm text-gray-500">{sheet.sheets.length} tabs</div>
+                )}
               </div>
             ))}
           </div>
@@ -755,6 +789,9 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
       {selectedSpreadsheet && (
         <div>
           <h4 className="font-medium text-gray-900 mb-2">Select Tab to Transfer</h4>
+          {tabsLoading ? (
+            <div className="text-sm text-gray-500 py-2">Loading tabs...</div>
+          ) : (
           <div className="space-y-2 max-h-40 overflow-y-auto">
             {selectedSpreadsheet.sheets.map((tab) => (
               <label key={tab.sheetId} className="flex items-center space-x-2 cursor-pointer">
@@ -773,6 +810,7 @@ const TransferWizard: React.FC<TransferWizardProps> = ({ onJobCreated }) => {
               </label>
             ))}
           </div>
+          )}
         </div>
       )}
     </div>
