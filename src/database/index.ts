@@ -1,3 +1,4 @@
-// Import SQLite implementation for production-ready concurrent database access
-export { database, initializeDatabase } from './sqlite';
-export { default } from './sqlite';
+// Postgres-backed persistence. Replaces the previous SQLite implementation so
+// the app is not tied to a host-attached disk and gets managed backups.
+export { database, initializeDatabase } from './postgres';
+export { default } from './postgres';

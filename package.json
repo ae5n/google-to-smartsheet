@@ -19,7 +19,6 @@
     "@types/node": "^20.10.5",
     "axios": "^1.6.2",
     "bcryptjs": "^2.4.3",
-    "better-sqlite3": "^12.2.0",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
     "crypto-js": "^4.2.0",
@@ -34,14 +33,14 @@
     "jsonwebtoken": "^9.0.2",
     "mime-types": "^2.1.35",
     "multer": "^2.0.0-rc.4",
-    "sharp": "^0.33.1",
+    "pg": "^8.22.0",
+    "sharp": "^0.35.3",
     "socket.io": "^4.8.1",
     "typescript": "^5.3.3",
     "uuid": "^9.0.1"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/cookie-parser": "^1.4.6",
     "@types/cors": "^2.8.17",
     "@types/crypto-js": "^4.2.1",
@@ -51,6 +50,7 @@
     "@types/jsonwebtoken": "^9.0.5",
     "@types/mime-types": "^2.1.4",
     "@types/multer": "^1.4.11",
+    "@types/pg": "^8.20.4",
     "@types/uuid": "^9.0.7",
     "@typescript-eslint/eslint-plugin": "^6.13.2",
     "@typescript-eslint/parser": "^6.13.2",
@@ -62,6 +62,6 @@
     "ts-node": "^10.9.2"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.9.0"
   }
 }

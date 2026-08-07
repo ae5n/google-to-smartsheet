@@ -11,8 +11,6 @@ import {
   XCircleIcon,
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline';
-import clsx from 'clsx';
-import toast from 'react-hot-toast';
 
 function DashboardPage() {
   const { user, connectGoogle, connectSmartsheet } = useAuth();
@@ -42,6 +40,8 @@ function DashboardPage() {
     switch (status) {
       case 'completed':
         return <CheckCircleIcon className="h-5 w-5 text-green-500" />;
+      case 'completed_with_errors':
+        return <ExclamationTriangleIcon className="h-5 w-5 text-orange-500" />;
       case 'failed':
       case 'cancelled':
         return <XCircleIcon className="h-5 w-5 text-red-500" />;
@@ -56,6 +56,8 @@ function DashboardPage() {
     switch (status) {
       case 'completed':
         return 'Completed';
+      case 'completed_with_errors':
+        return 'Completed with errors';
       case 'failed':
         return 'Failed';
       case 'cancelled':

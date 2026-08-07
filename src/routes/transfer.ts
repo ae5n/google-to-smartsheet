@@ -92,11 +92,34 @@ router.post('/jobs', [
   }
 });
 
+/**
+ * Resolves a job and asserts the caller owns it. Every job-scoped route goes
+ * through this so ownership can never be forgotten on a new endpoint.
+ */
+async function loadOwnedJob(req: Request, res: Response) {
+  const job = await database.getTransferJobById(req.params.jobId);
+
+  if (!job) {
+    res.status(404).json({ success: false, error: 'Transfer job not found' } as APIResponse);
+    return null;
+  }
+
+  if (job.userId !== req.session.user!.id) {
+    // Same response as "not found": do not confirm the job exists.
+    res.status(404).json({ success: false, error: 'Transfer job not found' } as APIResponse);
+    return null;
+  }
+
+  return job;
+}
+
 router.get('/jobs/:jobId', pollingRateLimiter, async (req: Request, res: Response) => {
   try {
     const { jobId } = req.params;
     const userId = req.session.user!.id;
 
+    // Logs have their own incremental endpoint. Returning the full append-only
+    // history here made every fallback poll download the entire log again.
     const job = await database.getTransferJobById(jobId);
     if (!job) {
       return res.status(404).json({
@@ -224,6 +247,142 @@ router.get('/jobs/:jobId/progress', pollingRateLimiter, async (req: Request, res
       success: false,
       error: error.message
     } as APIResponse);
+  }
+});
+
+/**
+ * Incremental log fetch. `?afterSeq=N` returns only entries newer than N, so a
+ * client that reconnects resumes rather than re-downloading the history.
+ */
+router.get('/jobs/:jobId/logs', pollingRateLimiter, async (req: Request, res: Response) => {
+  try {
+    const job = await loadOwnedJob(req, res);
+    if (!job) return;
+
+    const afterSeq = parseInt(req.query.afterSeq as string, 10) || 0;
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 500, 2000);
+    const logs = await database.getTransferLogs(job.id, afterSeq, limit);
+
+    res.json({
+      success: true,
+      data: {
+        logs,
+        total: await database.countTransferLogs(job.id),
+        lastSeq: logs.length > 0 ? logs[logs.length - 1].seq : afterSeq
+      }
+    } as APIResponse);
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message } as APIResponse);
+  }
+});
+
+/**
+ * The audit ledger: what actually landed. `status` filters to e.g. only the
+ * rows that failed, which is the practical starting point for a re-run.
+ */
+router.get('/jobs/:jobId/ledger', async (req: Request, res: Response) => {
+  try {
+    const job = await loadOwnedJob(req, res);
+    if (!job) return;
+
+    const kind = req.query.kind === 'images' ? 'images' : 'rows';
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 200, 1000);
+    const offset = parseInt(req.query.offset as string, 10) || 0;
+
+    const entries =
+      kind === 'images'
+        ? await database.getImageResults(job.id, { status, limit, offset })
+        : await database.getRowResults(job.id, { status, limit, offset });
+
+    res.json({
+      success: true,
+      data: { kind, entries, summary: await database.getLedgerSummary(job.id) }
+    } as APIResponse);
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message } as APIResponse);
+  }
+});
+
+const csvEscape = (value: any): string => {
+  if (value === null || value === undefined) return '';
+  const text = String(value);
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
+
+/** CSV export of the full ledger — the artefact to hand someone as proof. */
+router.get('/jobs/:jobId/ledger.csv', async (req: Request, res: Response) => {
+  try {
+    const job = await loadOwnedJob(req, res);
+    if (!job) return;
+
+    const kind = req.query.kind === 'images' ? 'images' : 'rows';
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+
+    const header =
+      kind === 'images'
+        ? [
+            'tab',
+            'source_row',
+            'source_column',
+            'status',
+            'target_row_number',
+            'target_row_id',
+            'target_column_id',
+            'image_url',
+            'error'
+          ]
+        : ['tab', 'source_row', 'status', 'target_row_id', 'target_row_number', 'error'];
+
+    const lines: string[] = [header.join(',')];
+
+    // Paged so a job with hundreds of thousands of rows does not have to be
+    // materialised in memory before the first byte goes out.
+    const pageSize = 1000;
+    for (let offset = 0; ; offset += pageSize) {
+      const page =
+        kind === 'images'
+          ? await database.getImageResults(job.id, { status, limit: pageSize, offset })
+          : await database.getRowResults(job.id, { status, limit: pageSize, offset });
+
+      if (page.length === 0) break;
+
+      for (const entry of page) {
+        const row =
+          kind === 'images'
+            ? [
+                (entry as any).tabName,
+                entry.sourceRowNumber,
+                (entry as any).sourceColumn,
+                entry.status,
+                (entry as any).targetRowNumber,
+                entry.targetRowId,
+                (entry as any).targetColumnId,
+                (entry as any).imageUrl,
+                entry.error
+              ]
+            : [
+                entry.tabName,
+                entry.sourceRowNumber,
+                entry.status,
+                entry.targetRowId,
+                (entry as any).targetRowNumber,
+                entry.error
+              ];
+        lines.push(row.map(csvEscape).join(','));
+      }
+
+      if (page.length < pageSize) break;
+    }
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="transfer-${job.id}-${kind}.csv"`
+    );
+    res.send(lines.join('\r\n'));
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message } as APIResponse);
   }
 });
 

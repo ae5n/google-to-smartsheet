@@ -6,19 +6,43 @@ import { googleAuthService } from '../auth/google';
 import { smartsheetAuthService } from '../auth/smartsheet';
 import database from '../database';
 import { webSocketService } from './websocket';
-import { 
-  TransferJob, 
-  ColumnMapping, 
-  GoogleCellValue, 
-  SmartsheetCellValue, 
+import { imageGate } from '../utils/rateLimiter';
+import {
+  TransferJob,
+  ColumnMapping,
+  GoogleCellValue,
+  SmartsheetCellValue,
   TransferError,
   TransferWarning,
   TransferLog,
   SourceInfo,
   TargetInfo,
   DryRunResult,
-  EncryptedTokens
+  EncryptedTokens,
+  RowResultRecord,
+  ImageResultRecord
 } from '../types';
+
+/** Raised when the user cancels; unwinds the transfer without marking failure. */
+class TransferCancelled extends Error {
+  constructor() {
+    super('Transfer cancelled by user');
+    this.name = 'TransferCancelled';
+  }
+}
+
+/** One image awaiting upload, tied to the batch row it came from. */
+interface QueuedImage {
+  /** Index into the batch's row array — the join key to the insert results. */
+  batchIndex: number;
+  sourceRowNumber: number;
+  columnId: number;
+  sourceColumn: string;
+  imageUrl: string;
+  imageId?: string;
+}
+
+const ROW_BATCH_SIZE = 50;
 
 export class TransferService {
   private async addJobLog(
@@ -35,32 +59,28 @@ export class TransferService {
       emoji,
       details
     };
-    
-    // Log concisely - only essential details, avoid verbose output
-    if (details && typeof details === 'object') {
-      // Only log specific useful details
-      const summary: string[] = [];
-      if ('progress' in details && details.progress) summary.push(`progress: ${details.progress}`);
-      if ('success' in details && details.success !== undefined) summary.push(`success: ${details.success}`);
-      if ('failed' in details && details.failed !== undefined) summary.push(`failed: ${details.failed}`);
-      if ('batch' in details && details.batch !== undefined) summary.push(`batch: ${details.batch}`);
-      if ('totalRows' in details && details.totalRows !== undefined) summary.push(`rows: ${details.totalRows}`);
-      if ('totalImages' in details && details.totalImages !== undefined) summary.push(`images: ${details.totalImages}`);
-      if ('error' in details && details.error) summary.push(`error: ${details.error}`);
-      if ('tab' in details && details.tab) summary.push(`tab: ${details.tab}`);
-      
-      const summaryText = summary.length > 0 ? ` (${summary.join(', ')})` : '';
-      console.log(`${emoji} ${message}${summaryText}`);
-    } else {
-      console.log(`${emoji} ${message}${details ? ` - ${details}` : ''}`);
-    }
-    
-    const job = await database.getTransferJobById(jobId);
-    if (job) {
-      const updatedLogs = [...(job.logs || []), log];
-      await database.updateTransferJobLogs(jobId, updatedLogs);
+
+    // Append-only: no read-modify-write of a growing JSON blob, so entries
+    // cannot be lost and cost stays constant as the log grows.
+    const stored = await database.appendTransferLog(jobId, log);
+
+    const detailText =
+      details && typeof details === 'object'
+        ? ` ${JSON.stringify(details)}`
+        : details
+          ? ` - ${details}`
+          : '';
+    console.log(`${emoji} ${message}${detailText}`);
+
+    webSocketService.emitJobLog(jobId, stored);
+  }
+
+  private async checkCancelled(jobId: string): Promise<void> {
+    if (await database.isCancelRequested(jobId)) {
+      throw new TransferCancelled();
     }
   }
+
   public async createTransferJob(
     userId: string,
     googleSpreadsheetId: string,
@@ -82,8 +102,13 @@ export class TransferService {
       progress: {
         totalRows: 0,
         processedRows: 0,
+        insertedRows: 0,
+        failedRows: 0,
         totalImages: 0,
         processedImages: 0,
+        successfulImages: 0,
+        fallbackImages: 0,
+        failedImages: 0,
         errors: [],
         warnings: []
       },
@@ -127,20 +152,29 @@ export class TransferService {
       );
 
       if (job.dryRun) {
-        await this.performDryRun(job, googleTokens, smartsheetTokens);
+        await this.performDryRun(job, googleTokens);
+        await this.addJobLog(jobId, 'success', 'Dry run completed', '✅');
+        await database.updateTransferJobStatus(jobId, 'completed');
       } else {
         await this.performActualTransfer(job, googleTokens, smartsheetTokens);
+        await this.finalise(jobId);
       }
 
-      await this.addJobLog(jobId, 'success', 'Transfer completed successfully', '✅');
-      await database.updateTransferJobStatus(jobId, 'completed');
-      
-      // Emit completion via WebSocket
       const completedJob = await database.getTransferJobById(jobId);
       if (completedJob) {
         webSocketService.emitJobCompleted(jobId, completedJob);
       }
     } catch (error: any) {
+      if (error instanceof TransferCancelled) {
+        await this.addJobLog(jobId, 'warn', 'Transfer cancelled', '⏹️');
+        await database.updateTransferJobStatus(jobId, 'cancelled');
+        const cancelledJob = await database.getTransferJobById(jobId);
+        if (cancelledJob) {
+          webSocketService.emitJobCompleted(jobId, cancelledJob);
+        }
+        return;
+      }
+
       const currentJob = await database.getTransferJobById(jobId);
       if (currentJob) {
         const updatedProgress = {
@@ -160,8 +194,7 @@ export class TransferService {
         };
         await this.addJobLog(jobId, 'error', `Transfer failed: ${error.message}`, '❌');
         await database.updateTransferJobStatus(jobId, 'failed', updatedProgress);
-        
-        // Emit failure via WebSocket
+
         const failedJob = await database.getTransferJobById(jobId);
         if (failedJob) {
           webSocketService.emitJobFailed(jobId, failedJob, error.message);
@@ -171,10 +204,56 @@ export class TransferService {
     }
   }
 
+  /**
+   * Chooses the terminal status from the ledger rather than from whether the
+   * loop happened to finish. A run that inserted 400 of 500 rows is not a
+   * success, and must not be reported as one.
+   */
+  private async finalise(jobId: string): Promise<void> {
+    const summary = await database.getLedgerSummary(jobId);
+    const inserted = summary.rows.inserted || 0;
+    const failed = summary.rows.failed || 0;
+    const skipped = summary.rows.skipped || 0;
+    const imagesFailed = summary.images.failed || 0;
+    const imagesFallback = summary.images.link_fallback || 0;
+
+    const hasProblems = failed > 0 || skipped > 0 || imagesFailed > 0;
+
+    if (hasProblems) {
+      await this.addJobLog(
+        jobId,
+        'warn',
+        `Transfer finished with issues — ${inserted} rows transferred, ${failed + skipped} not transferred`,
+        '⚠️',
+        {
+          rowsInserted: inserted,
+          rowsFailed: failed,
+          rowsSkipped: skipped,
+          imagesEmbedded: summary.images.embedded || 0,
+          imagesAsLinks: imagesFallback,
+          imagesFailed
+        }
+      );
+      await database.updateTransferJobStatus(jobId, 'completed_with_errors');
+    } else {
+      await this.addJobLog(
+        jobId,
+        'success',
+        `Transfer completed — all ${inserted} rows transferred`,
+        '✅',
+        {
+          rowsInserted: inserted,
+          imagesEmbedded: summary.images.embedded || 0,
+          imagesAsLinks: imagesFallback
+        }
+      );
+      await database.updateTransferJobStatus(jobId, 'completed');
+    }
+  }
+
   private async performDryRun(
     job: TransferJob,
-    googleTokens: EncryptedTokens,
-    smartsheetTokens: EncryptedTokens
+    googleTokens: EncryptedTokens
   ): Promise<void> {
     // Use user-selected header row index or detect it automatically
     let headerRowIndex = job.headerRowIndex;
@@ -201,13 +280,14 @@ export class TransferService {
     let totalImages = 0;
     const images: Array<{ url: string; driveFileId?: string }> = [];
 
-    // Count rows and images
-    for (const [tabName, tabData] of Object.entries(googleData)) {
-      if (tabData.length > 1) { // Exclude header row
+    for (const [, tabData] of Object.entries(googleData)) {
+      if (tabData.length > 1) {
         totalRows += tabData.length - 1;
       }
 
-      for (const row of tabData) {
+      // Skip the header row: it is not data, and counting it inflated the
+      // image total the user was shown.
+      for (const row of tabData.slice(1)) {
         for (const cell of row) {
           if (cell.isImage && cell.imageUrl) {
             totalImages++;
@@ -227,12 +307,6 @@ export class TransferService {
       imageValidationSample
     );
 
-    const inaccessibleCount = imageValidationResults.filter(r => !r.accessible).length;
-    const estimatedInaccessibleImages = images.length > 50
-      ? Math.round((inaccessibleCount / imageValidationSample.length) * images.length)
-      : inaccessibleCount;
-
-    // Update job progress
     const progress = {
       totalRows,
       processedRows: totalRows, // Mark as "processed" for dry run
@@ -268,13 +342,11 @@ export class TransferService {
       headerRowIndex = result.headerRowIndex;
     }
 
-    // Add source and target info to job
     await this.addJobLog(job.id, 'info', 'Transfer started', '🚀', {
       headerRow: headerRowIndex + 1,
       targetSheetId: job.smartsheetId
     });
 
-    // Get Google Sheets data and source info
     const googleData = await googleSheetsService.getSpreadsheetData(
       googleTokens,
       job.googleSpreadsheetId,
@@ -283,8 +355,10 @@ export class TransferService {
       headerRowIndex
     );
 
-    // Get actual spreadsheet name
-    const spreadsheetInfo = await googleSheetsService.getSpreadsheetInfo(googleTokens, job.googleSpreadsheetId);
+    const spreadsheetInfo = await googleSheetsService.getSpreadsheetInfo(
+      googleTokens,
+      job.googleSpreadsheetId
+    );
     const sourceInfo: SourceInfo = {
       spreadsheetTitle: spreadsheetInfo?.title || `Spreadsheet ${job.googleSpreadsheetId}`,
       tabNames: job.googleSheetTabs,
@@ -293,60 +367,54 @@ export class TransferService {
       totalImages: 0
     };
 
-    // Fix column mappings and get target info
-    const actualSheet = await smartsheetAPIService.getSheetDetails(smartsheetTokens, job.smartsheetId);
+    const actualSheet = await smartsheetAPIService.getSheetDetails(
+      smartsheetTokens,
+      job.smartsheetId
+    );
     const targetInfo: TargetInfo = {
       sheetName: actualSheet.name,
       sheetUrl: actualSheet.permalink
     };
-    
+
     const fixedColumnMappings = job.columnMappings.map((mapping, index) => {
       const actualColumn = actualSheet.columns[index];
-      if (actualColumn) {
-        return {
-          ...mapping,
-          smartsheetColumnId: actualColumn.id
-        };
-      } else {
-        console.error(`❌ Column mapping failed: Trying to map to column ${index + 1} but existing sheet "${actualSheet.name}" only has ${actualSheet.columns.length} columns`);
-        throw new Error(`Cannot map ${job.columnMappings.length} columns to existing sheet "${actualSheet.name}" which only has ${actualSheet.columns.length} columns. Please select fewer columns or use a different target sheet.`);
+      if (!actualColumn) {
+        throw new Error(
+          `Cannot map ${job.columnMappings.length} columns to existing sheet "${actualSheet.name}" which only has ${actualSheet.columns.length} columns. Please select fewer columns or use a different target sheet.`
+        );
       }
+      return { ...mapping, smartsheetColumnId: actualColumn.id };
     });
 
-    // Use the fixed mappings for the rest of the transfer
     job.columnMappings = fixedColumnMappings;
 
-    const errors: TransferError[] = [];
-    let totalRows = 0;
-    let processedRows = 0;
-    let totalImages = 0;
-    let processedImages = 0;
-    let successfulImages = 0;
-    let fallbackImages = 0;
-    let failedImages = 0;
+    /** Resolves a mapping to its source column index, once, up front. */
+    const sourceIndexOf = (mapping: ColumnMapping, position: number): number =>
+      mapping.googleColumnIndex !== undefined ? mapping.googleColumnIndex : position;
 
-    // Count total rows and images first (only from selected columns)
-    for (const [tabName, tabData] of Object.entries(googleData)) {
+    const errors: TransferError[] = [];
+    const warnings: TransferWarning[] = [];
+    let totalRows = 0;
+    let totalImages = 0;
+
+    // Count rows and images from the mapped columns of data rows only.
+    for (const [, tabData] of Object.entries(googleData)) {
       if (tabData.length > 1) {
-        totalRows += tabData.length - 1; // Exclude header
+        totalRows += tabData.length - 1;
       }
-      // Count images only from selected columns
-      for (const row of tabData) {
-        for (const mapping of job.columnMappings) {
-          const googleColumnIndex = mapping.googleColumnIndex !== undefined ? mapping.googleColumnIndex : job.columnMappings.indexOf(mapping);
-          const cell = row[googleColumnIndex];
-          if (cell && cell.isImage) totalImages++;
-        }
+      for (const row of tabData.slice(1)) {
+        job.columnMappings.forEach((mapping, position) => {
+          const cell = row[sourceIndexOf(mapping, position)];
+          if (cell?.isImage && cell.imageUrl) totalImages++;
+        });
       }
     }
 
-    // Update source info with actual counts
     sourceInfo.totalDataRows = totalRows;
     sourceInfo.totalImages = totalImages;
-    
-    // Save source and target info to job
+
     await database.updateTransferJobInfo(job.id, sourceInfo, targetInfo);
-    
+
     await this.addJobLog(job.id, 'info', 'Transfer initialized', '📋', {
       source: sourceInfo.spreadsheetTitle,
       target: targetInfo.sheetName,
@@ -354,297 +422,304 @@ export class TransferService {
       totalImages
     });
 
-    await database.updateTransferJobStatus(job.id, 'running', {
-      totalRows,
-      processedRows,
-      totalImages,
-      processedImages,
-      successfulImages,
-      fallbackImages,
-      failedImages,
-      errors,
-      warnings: []
-    });
+    // Running tallies. Every one of these is derived from a confirmed outcome,
+    // never from an intention.
+    let processedRows = 0;
+    let insertedRows = 0;
+    let failedRows = 0;
+    let processedImages = 0;
+    let successfulImages = 0;
+    let fallbackImages = 0;
+    let failedImages = 0;
 
-    // Process each tab
-    for (const [tabName, tabData] of Object.entries(googleData)) {
-      if (tabData.length <= 1) {
-        continue; // Skip if no data rows
-      }
-
-      const dataRows = tabData.slice(1); // Skip header row
-      await this.addJobLog(job.id, 'info', `Processing ${tabName}`, '📋', { 
-        tab: tabName, 
-        rows: dataRows.length 
+    const publishProgress = async (extra: Record<string, any> = {}) => {
+      await database.updateTransferJobStatus(job.id, 'running', {
+        totalRows,
+        processedRows,
+        insertedRows,
+        failedRows,
+        totalImages,
+        processedImages,
+        successfulImages,
+        fallbackImages,
+        failedImages,
+        errors,
+        warnings,
+        ...extra
       });
 
-      // Process rows in batches
-      const batchSize = 50;
-      for (let i = 0; i < dataRows.length; i += batchSize) {
-        const batch = dataRows.slice(i, i + batchSize);
-        const smartsheetRows: Array<{ cells: SmartsheetCellValue[] }> = [];
-        const imageQueue: Array<{ rowIndex: number; columnId: number; imageUrl: string; imageId?: string }> = [];
+      const updated = await database.getTransferJobById(job.id);
+      if (updated) webSocketService.emitJobUpdate(job.id, updated);
+    };
 
-        for (let rowIndex = 0; rowIndex < batch.length; rowIndex++) {
-          const googleRow = batch[rowIndex];
+    await publishProgress();
+
+    for (const [tabName, tabData] of Object.entries(googleData)) {
+      if (tabData.length <= 1) {
+        continue; // No data rows
+      }
+
+      const dataRows = tabData.slice(1);
+      // Source row numbers as the user sees them in Google Sheets: the header
+      // is at `headerRowIndex` (0-based), so the first data row is +2 in
+      // 1-based terms. Error messages now reference real, findable rows.
+      const firstDataRowNumber = headerRowIndex + 2;
+
+      await this.addJobLog(job.id, 'info', `Processing ${tabName}`, '📋', {
+        tab: tabName,
+        rows: dataRows.length
+      });
+
+      const totalBatches = Math.ceil(dataRows.length / ROW_BATCH_SIZE);
+
+      for (let offset = 0; offset < dataRows.length; offset += ROW_BATCH_SIZE) {
+        await this.checkCancelled(job.id);
+
+        const batch = dataRows.slice(offset, offset + ROW_BATCH_SIZE);
+        const batchNum = Math.floor(offset / ROW_BATCH_SIZE) + 1;
+
+        const smartsheetRows: Array<{ cells: SmartsheetCellValue[] }> = [];
+        const imageQueue: QueuedImage[] = [];
+        const rowLedger: RowResultRecord[] = [];
+        const imageLedger: ImageResultRecord[] = [];
+
+        /**
+         * Maps position-in-`smartsheetRows` back to the source row number.
+         * This is the fix for the image misalignment bug: previously the image
+         * queue keyed on the index within `batch`, while insert results are
+         * aligned to `smartsheetRows`. Any row that failed conversion was
+         * skipped, shifting every subsequent index by one — and images silently
+         * attached to the wrong rows.
+         */
+        const batchIndexToSourceRow: number[] = [];
+
+        for (let i = 0; i < batch.length; i++) {
+          const googleRow = batch[i];
+          const sourceRowNumber = firstDataRowNumber + offset + i;
+          processedRows++;
+
           try {
-            const smartsheetCells = await this.convertRowToSmartsheet(
+            const pendingImages: QueuedImage[] = [];
+            const cells = this.convertRowToSmartsheet(
               googleRow,
               job.columnMappings,
-              googleTokens,
-              smartsheetTokens,
-              imageQueue,
-              rowIndex
+              sourceIndexOf,
+              sourceRowNumber,
+              pendingImages
             );
 
+            const batchIndex = smartsheetRows.length;
+            smartsheetRows.push({ cells });
+            batchIndexToSourceRow[batchIndex] = sourceRowNumber;
 
-            smartsheetRows.push({ cells: smartsheetCells });
-
-            // Update image progress (only from selected columns)
-            for (const mapping of job.columnMappings) {
-              const googleColumnIndex = mapping.googleColumnIndex !== undefined ? mapping.googleColumnIndex : job.columnMappings.indexOf(mapping);
-              const cell = googleRow[googleColumnIndex];
-              if (cell && cell.isImage) {
-                processedImages++;
-              }
+            for (const image of pendingImages) {
+              imageQueue.push({ ...image, batchIndex });
             }
           } catch (error: any) {
+            // The row never reached Smartsheet — record it as such.
+            failedRows++;
+            rowLedger.push({
+              tabName,
+              sourceRowNumber,
+              status: 'failed',
+              error: `Could not build row: ${error.message}`
+            });
             errors.push({
-              type: 'row_insert_failed',
+              type: 'row_convert_failed',
               message: error.message,
-              row: processedRows + smartsheetRows.length,
-              details: {
-                name: error.name,
-                message: error.message,
-                stack: error.stack
-              }
+              row: sourceRowNumber,
+              tab: tabName
             });
           }
         }
 
-        // Insert batch to Smartsheet
         if (smartsheetRows.length > 0) {
+          let outcome;
           try {
-            const result = await smartsheetAPIService.addRowsToSheet(
+            outcome = await smartsheetAPIService.addRowsToSheet(
               smartsheetTokens,
               job.smartsheetId,
               smartsheetRows
             );
-
-            processedRows += result.success;
-            
-            const batchNum = Math.floor(i / batchSize) + 1;
-            const totalBatches = Math.ceil(dataRows.length / batchSize);
-            const progressPercent = Math.round((processedRows / totalRows) * 100);
-            
-            await this.addJobLog(job.id, 'success', `Batch ${batchNum}/${totalBatches} completed`, '✅', {
-              success: result.success,
-              failed: result.failed,
-              progress: `${processedRows}/${totalRows} (${progressPercent}%)`
-            });
-            
-            // Process images for successfully inserted rows
-            if (imageQueue.length > 0 && result.success > 0) {
-              const imageResults = await this.processImageQueue(
-                imageQueue, 
-                result, 
-                job.smartsheetId,
-                googleTokens,
-                smartsheetTokens
-              );
-              
-              // Update image statistics
-              successfulImages += imageResults.successful;
-              fallbackImages += imageResults.fallbacks;
-              failedImages += imageResults.failed;
-              
-              // Log image processing results
-              if (imageResults.successful > 0 || imageResults.fallbacks > 0 || imageResults.failed > 0) {
-                await this.addJobLog(job.id, 'info', `Image processing completed`, '🖼️', {
-                  successful: imageResults.successful,
-                  fallbacks: imageResults.fallbacks,
-                  failed: imageResults.failed,
-                  total: imageQueue.length
-                });
-                
-                // Add warning if there were fallbacks or failures
-                if (imageResults.fallbacks > 0) {
-                  await this.addJobLog(job.id, 'warn', `${imageResults.fallbacks} images converted to links (download failed)`, '⚠️');
-                }
-                if (imageResults.failed > 0) {
-                  await this.addJobLog(job.id, 'error', `${imageResults.failed} images could not be processed`, '❌');
-                }
-              }
-            }
-            
-            errors.push(...result.errors.map(e => ({
-              type: 'row_insert_failed' as const,
-              message: e.error,
-              row: e.row,
-              details: e
-            })));
           } catch (error: any) {
-            await this.addJobLog(job.id, 'error', 'Batch insertion failed', '❌', {
-              error: error.message,
-              batch: Math.floor(i / batchSize) + 1
+            // addRowsToSheet resolves per-row rather than throwing, so reaching
+            // here means something outside the insert itself broke.
+            failedRows += smartsheetRows.length;
+            smartsheetRows.forEach((_, index) => {
+              rowLedger.push({
+                tabName,
+                sourceRowNumber: batchIndexToSourceRow[index],
+                status: 'failed',
+                error: error.message
+              });
             });
             errors.push({
               type: 'row_insert_failed',
               message: error.message,
-              details: {
-                name: error.name,
-                message: error.message,
-                stack: error.stack
-              }
+              tab: tabName,
+              details: { batch: batchNum }
             });
+
+            await database.recordRowResults(job.id, rowLedger);
+            await this.addJobLog(job.id, 'error', `Batch ${batchNum}/${totalBatches} failed`, '❌', {
+              tab: tabName,
+              error: error.message
+            });
+            await publishProgress({ currentBatch: batchNum, totalBatches, currentTab: tabName });
+            continue;
+          }
+
+          insertedRows += outcome.success;
+          failedRows += outcome.failed;
+
+          for (const result of outcome.results) {
+            const sourceRowNumber = batchIndexToSourceRow[result.index];
+            rowLedger.push({
+              tabName,
+              sourceRowNumber,
+              targetRowId: result.rowId,
+              targetRowNumber: result.rowNumber,
+              status: result.inserted ? 'inserted' : 'failed',
+              error: result.error
+            });
+
+            if (!result.inserted) {
+              errors.push({
+                type: 'row_insert_failed',
+                message: result.error || 'Row insert failed',
+                row: sourceRowNumber,
+                tab: tabName
+              });
+            }
+          }
+
+          await database.recordRowResults(job.id, rowLedger);
+
+          await this.addJobLog(
+            job.id,
+            outcome.failed > 0 ? 'warn' : 'success',
+            `Batch ${batchNum}/${totalBatches} — ${outcome.success} rows transferred${
+              outcome.failed > 0 ? `, ${outcome.failed} failed` : ''
+            }`,
+            outcome.failed > 0 ? '⚠️' : '✅',
+            {
+              tab: tabName,
+              inserted: outcome.success,
+              failed: outcome.failed,
+              progress: `${insertedRows}/${totalRows}`
+            }
+          );
+
+          if (imageQueue.length > 0) {
+            const imageOutcome = await this.processImageQueue(
+              imageQueue,
+              outcome.results,
+              batchIndexToSourceRow,
+              tabName,
+              job.smartsheetId,
+              googleTokens,
+              smartsheetTokens,
+              imageLedger
+            );
+
+            successfulImages += imageOutcome.embedded;
+            fallbackImages += imageOutcome.fallbacks;
+            failedImages += imageOutcome.failed;
+            processedImages += imageOutcome.embedded + imageOutcome.fallbacks + imageOutcome.failed;
+
+            await database.recordImageResults(job.id, imageLedger);
+
+            if (imageOutcome.fallbacks > 0) {
+              warnings.push({
+                type: 'image_fallback',
+                message: `${imageOutcome.fallbacks} image(s) stored as links because the image itself could not be transferred`,
+                count: imageOutcome.fallbacks
+              });
+            }
+
+            await this.addJobLog(
+              job.id,
+              imageOutcome.failed > 0 ? 'warn' : 'info',
+              `Images for batch ${batchNum}: ${imageOutcome.embedded} embedded, ${imageOutcome.fallbacks} as links, ${imageOutcome.failed} failed`,
+              '🖼️',
+              {
+                tab: tabName,
+                embedded: imageOutcome.embedded,
+                links: imageOutcome.fallbacks,
+                failed: imageOutcome.failed
+              }
+            );
           }
         }
 
-        // Update progress with batch info
-        await database.updateTransferJobStatus(job.id, 'running', {
-          totalRows,
-          processedRows,
-          totalImages,
-          processedImages,
-          successfulImages,
-          fallbackImages,
-          failedImages,
-          currentBatch: Math.floor(i / batchSize) + 1,
-          totalBatches: Math.ceil(dataRows.length / batchSize),
-          errors,
-          warnings: []
-        });
-        
-        // Emit progress update via WebSocket every batch
-        const updatedJob = await database.getTransferJobById(job.id);
-        if (updatedJob) {
-          webSocketService.emitJobUpdate(job.id, updatedJob);
-        }
+        await publishProgress({ currentBatch: batchNum, totalBatches, currentTab: tabName });
       }
     }
   }
 
-  private async convertRowToSmartsheet(
+  /**
+   * Builds the Smartsheet cells for one source row.
+   *
+   * Synchronous and side-effect free: it appends any images it finds to
+   * `pendingImages` rather than uploading them, so the caller controls when
+   * uploads happen and can tie each one to a confirmed target row.
+   */
+  private convertRowToSmartsheet(
     googleRow: GoogleCellValue[],
     columnMappings: ColumnMapping[],
-    googleTokens: EncryptedTokens,
-    smartsheetTokens: EncryptedTokens,
-    imageQueue?: Array<{ rowIndex: number; columnId: number; imageUrl: string; imageId?: string }>,
-    currentRowIndex?: number
-  ): Promise<SmartsheetCellValue[]> {
-    const smartsheetCells: SmartsheetCellValue[] = [];
+    sourceIndexOf: (mapping: ColumnMapping, position: number) => number,
+    sourceRowNumber: number,
+    pendingImages: Array<Omit<QueuedImage, 'batchIndex'>>
+  ): SmartsheetCellValue[] {
+    const cells: SmartsheetCellValue[] = [];
 
-    for (let i = 0; i < columnMappings.length; i++) {
-      const mapping = columnMappings[i];
-      // Use the original Google column index if available, otherwise fall back to sequential index
-      const googleColumnIndex = mapping.googleColumnIndex !== undefined ? mapping.googleColumnIndex : i;
-      const googleCell = googleRow[googleColumnIndex];
+    columnMappings.forEach((mapping, position) => {
+      const googleCell = googleRow[sourceIndexOf(mapping, position)];
 
       if (!googleCell) {
-        smartsheetCells.push({
+        cells.push({ columnId: mapping.smartsheetColumnId, value: '' });
+        return;
+      }
+
+      if (googleCell.isImage && googleCell.imageUrl) {
+        // Placeholder is a link to the source, not the bare text
+        // "Loading image..." — if every later attempt fails, the cell still
+        // points somewhere useful instead of lying about being in progress.
+        cells.push({
           columnId: mapping.smartsheetColumnId,
-          value: ''
+          value: 'Image (pending)',
+          hyperlink: { url: googleCell.imageUrl, text: 'Image (pending)' }
         });
-        continue;
-      }
 
-      try {
-        if (googleCell.isImage && googleCell.imageUrl) {
-          // Create placeholder cell for image (will add actual image after row creation)
-          smartsheetCells.push({
-            columnId: mapping.smartsheetColumnId,
-            value: 'Loading image...'
-          });
-          
-          // Add to image queue for later processing
-          if (imageQueue && currentRowIndex !== undefined) {
-            imageQueue.push({
-              rowIndex: currentRowIndex,
-              columnId: mapping.smartsheetColumnId,
-              imageUrl: googleCell.imageUrl,
-              imageId: googleCell.imageId
-            });
-          }
-        } else if (googleCell.hyperlink && mapping.dataType === 'hyperlink') {
-          // Handle hyperlink cell
-          smartsheetCells.push({
-            columnId: mapping.smartsheetColumnId,
-            value: googleCell.value || googleCell.hyperlink,
-            hyperlink: {
-              url: googleCell.hyperlink,
-              text: googleCell.value || googleCell.hyperlink
-            }
-          });
-        } else {
-          // Handle regular cell
-          smartsheetCells.push({
-            columnId: mapping.smartsheetColumnId,
-            value: this.formatCellValue(googleCell.value, mapping.dataType)
-          });
-        }
-      } catch (error) {
-        // Fallback to text value if processing fails
-        smartsheetCells.push({
+        pendingImages.push({
+          sourceRowNumber,
           columnId: mapping.smartsheetColumnId,
-          value: googleCell.value || ''
+          sourceColumn: mapping.googleColumn,
+          imageUrl: googleCell.imageUrl,
+          imageId: googleCell.imageId
         });
-      }
-    }
-
-    return smartsheetCells;
-  }
-
-  private async processImageCell(
-    googleCell: GoogleCellValue,
-    columnId: number,
-    googleTokens: EncryptedTokens,
-    smartsheetTokens: EncryptedTokens
-  ): Promise<SmartsheetCellValue> {
-    try {
-      if (!googleCell.imageUrl) {
-        throw new Error('No image URL found');
+        return;
       }
 
-      // Download image
-      const imageData = await googleDriveService.downloadImage(
-        googleTokens,
-        googleCell.imageUrl,
-        googleCell.imageId
-      );
-
-      // Upload to Smartsheet
-      const imageId = await smartsheetAPIService.uploadImage(
-        smartsheetTokens,
-        imageData.buffer,
-        imageData.filename,
-        imageData.mimeType
-      );
-
-      return {
-        columnId,
-        objectValue: {
-          objectType: 'IMAGE',
-          imageId
-        }
-      };
-    } catch (error: any) {
-      // Fallback: use URL as hyperlink when image processing fails  
-      if (googleCell.imageUrl) {
-        return {
-          columnId,
-          value: 'Image Link',
+      if (googleCell.hyperlink && mapping.dataType === 'hyperlink') {
+        cells.push({
+          columnId: mapping.smartsheetColumnId,
+          value: googleCell.value || googleCell.hyperlink,
           hyperlink: {
-            url: googleCell.imageUrl,
-            text: 'Image Link'
+            url: googleCell.hyperlink,
+            text: googleCell.value || googleCell.hyperlink
           }
-        };
-      } else {
-        return {
-          columnId,
-          value: googleCell.value || 'Image not accessible'
-        };
+        });
+        return;
       }
-    }
+
+      cells.push({
+        columnId: mapping.smartsheetColumnId,
+        value: this.formatCellValue(googleCell.value, mapping.dataType)
+      });
+    });
+
+    return cells;
   }
 
   private formatCellValue(value: any, dataType: string): any {
@@ -653,84 +728,133 @@ export class TransferService {
     }
 
     switch (dataType) {
-      case 'number':
+      case 'number': {
         const num = parseFloat(value);
         return isNaN(num) ? value : num;
-      case 'date':
-        // Try to parse as date
+      }
+      case 'date': {
         const date = new Date(value);
         return isNaN(date.getTime()) ? value : date.toISOString().split('T')[0];
+      }
       default:
         return String(value);
     }
   }
 
+  /**
+   * Downloads each queued image and attaches it to the target row that its
+   * source row actually became. Images whose row failed to insert are recorded
+   * as skipped rather than silently dropped.
+   *
+   * Runs through a concurrency gate so a 50-row batch cannot fire 50
+   * simultaneous downloads and uploads at the rate limiters.
+   */
   private async processImageQueue(
-    imageQueue: Array<{ rowIndex: number; columnId: number; imageUrl: string; imageId?: string }>,
-    insertResult: any,
+    imageQueue: QueuedImage[],
+    insertResults: Array<{ index: number; inserted?: boolean; rowId?: number }>,
+    batchIndexToSourceRow: number[],
+    tabName: string,
     sheetId: number,
     googleTokens: EncryptedTokens,
-    smartsheetTokens: EncryptedTokens
-  ): Promise<{ successful: number; failed: number; fallbacks: number }> {
-    // Get the actual row IDs from the insert result - try different possible structures
-    const insertedRows = insertResult.result || insertResult.data || insertResult || [];
-    
-    let successful = 0;
-    let failed = 0;
-    let fallbacks = 0;
-    
-    // Log image processing concisely
-    if (imageQueue.length > 0) {
-      console.log(`🖼️ Processing ${imageQueue.length} images`);
-    }
-    
-    for (const imageItem of imageQueue) {
-      // Find the corresponding inserted row first (outside try block)
-      const insertedRow = insertedRows[imageItem.rowIndex];
-      if (!insertedRow || !insertedRow.id) {
-        failed++;
-        continue; // Skip - row structure issues
-      }
+    smartsheetTokens: EncryptedTokens,
+    ledger: ImageResultRecord[]
+  ): Promise<{ embedded: number; fallbacks: number; failed: number }> {
+    const rowIdByIndex = new Map<number, number | undefined>(
+      insertResults.map(r => [r.index, r.inserted ? r.rowId : undefined])
+    );
 
-      try {
-        // Download and add image
-        const imageData = await googleDriveService.downloadImage(
-          googleTokens,
-          imageItem.imageUrl,
-          imageItem.imageId
-        );
-        
-        await smartsheetAPIService.addImageToCell(
-          smartsheetTokens,
-          sheetId,
-          insertedRow.id,
-          imageItem.columnId,
-          imageData.buffer,
-          imageData.filename,
-          imageData.mimeType
-        );
-        
-        successful++;
-      } catch (error: any) {
-        // Fallback: update cell with URL hyperlink
-        console.log(`⚠️ Image fallback: ${imageItem.imageUrl}`);
-        try {
-          await smartsheetAPIService.updateCellWithUrl(
-            smartsheetTokens,
-            sheetId,
-            insertedRow.id,
-            imageItem.columnId,
-            imageItem.imageUrl
-          );
-          fallbacks++;
-        } catch (fallbackError: any) {
-          console.log(`❌ Image processing failed: ${fallbackError.message}`);
-          failed++;
-        }
-      }
-    }
-    
-    return { successful, failed, fallbacks };
+    let embedded = 0;
+    let fallbacks = 0;
+    let failed = 0;
+
+    await Promise.all(
+      imageQueue.map(item =>
+        imageGate.run(async () => {
+          const targetRowId = rowIdByIndex.get(item.batchIndex);
+
+          if (!targetRowId) {
+            failed++;
+            ledger.push({
+              tabName,
+              sourceRowNumber: item.sourceRowNumber,
+              sourceColumn: item.sourceColumn,
+              targetColumnId: item.columnId,
+              imageUrl: item.imageUrl,
+              status: 'skipped',
+              error: 'Target row was not inserted, so the image had nowhere to go'
+            });
+            return;
+          }
+
+          try {
+            const imageData = await googleDriveService.downloadImage(
+              googleTokens,
+              item.imageUrl,
+              item.imageId
+            );
+
+            await smartsheetAPIService.addImageToCell(
+              smartsheetTokens,
+              sheetId,
+              targetRowId,
+              item.columnId,
+              imageData.buffer,
+              imageData.filename,
+              imageData.mimeType
+            );
+
+            embedded++;
+            ledger.push({
+              tabName,
+              sourceRowNumber: item.sourceRowNumber,
+              sourceColumn: item.sourceColumn,
+              targetRowId,
+              targetColumnId: item.columnId,
+              imageUrl: item.imageUrl,
+              status: 'embedded'
+            });
+          } catch (error: any) {
+            // The cell already holds a link to the source image from the
+            // insert, so a failure here degrades gracefully — but it is still
+            // recorded as a fallback, never as a success.
+            try {
+              await smartsheetAPIService.updateCellWithUrl(
+                smartsheetTokens,
+                sheetId,
+                targetRowId,
+                item.columnId,
+                item.imageUrl
+              );
+              fallbacks++;
+              ledger.push({
+                tabName,
+                sourceRowNumber: item.sourceRowNumber,
+                sourceColumn: item.sourceColumn,
+                targetRowId,
+                targetColumnId: item.columnId,
+                imageUrl: item.imageUrl,
+                status: 'link_fallback',
+                error: error.message
+              });
+            } catch (fallbackError: any) {
+              failed++;
+              ledger.push({
+                tabName,
+                sourceRowNumber: item.sourceRowNumber,
+                sourceColumn: item.sourceColumn,
+                targetRowId,
+                targetColumnId: item.columnId,
+                imageUrl: item.imageUrl,
+                status: 'failed',
+                error: `${error.message}; link fallback also failed: ${fallbackError.message}`
+              });
+            }
+          }
+        })
+      )
+    );
+
+    return { embedded, fallbacks, failed };
   }
 
   public async getDryRunResult(jobId: string): Promise<DryRunResult | null> {
@@ -753,15 +877,23 @@ export class TransferService {
     return await database.getTransferJobById(jobId);
   }
 
+  /**
+   * Requests cancellation. The running loop checks this between batches and
+   * unwinds cleanly — previously this only flipped the status while the
+   * transfer carried on writing rows.
+   */
   public async cancelTransfer(jobId: string): Promise<void> {
     const job = await database.getTransferJobById(jobId);
     if (!job) {
       throw new Error('Transfer job not found');
     }
 
-    if (job.status === 'running') {
-      await database.updateTransferJobStatus(jobId, 'cancelled');
+    if (job.status !== 'running' && job.status !== 'pending') {
+      return; // Already finished; nothing to stop.
     }
+
+    await database.requestCancel(jobId);
+    await this.addJobLog(jobId, 'warn', 'Cancellation requested — stopping after the current batch', '⏹️');
   }
 }
 

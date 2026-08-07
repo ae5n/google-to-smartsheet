@@ -6,7 +6,6 @@ import {
   ArrowRightOnRectangleIcon,
   ClockIcon,
   Cog6ToothIcon,
-  UserIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
 

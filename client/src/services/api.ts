@@ -5,7 +5,9 @@ import {
   GoogleSheet, 
   SmartsheetSheet, 
   TransferJob,
-  DryRunResult
+  DryRunResult,
+  TransferLog,
+  LedgerResponse
 } from '../types';
 
 const API_BASE_URL = process.env.NODE_ENV === 'production' 
@@ -214,6 +216,24 @@ export const transferAPI = {
 
   getJobErrors: (jobId: string): Promise<AxiosResponse<APIResponse<any>>> =>
     api.get(`/api/transfer/jobs/${jobId}/errors`),
+
+  /** Fetches only log entries newer than `afterSeq`. */
+  getJobLogs: (
+    jobId: string,
+    afterSeq = 0
+  ): Promise<AxiosResponse<APIResponse<{ logs: TransferLog[]; total: number; lastSeq: number }>>> =>
+    api.get(`/api/transfer/jobs/${jobId}/logs`, { params: { afterSeq } }),
+
+  getJobLedger: (
+    jobId: string,
+    options: { kind?: 'rows' | 'images'; status?: string; limit?: number; offset?: number } = {}
+  ): Promise<AxiosResponse<APIResponse<LedgerResponse>>> =>
+    api.get(`/api/transfer/jobs/${jobId}/ledger`, { params: options }),
+
+  ledgerCsvUrl: (jobId: string, kind: 'rows' | 'images', status?: string): string => {
+    const query = new URLSearchParams({ kind, ...(status ? { status } : {}) });
+    return `${API_BASE_URL}/api/transfer/jobs/${jobId}/ledger.csv?${query.toString()}`;
+  }
 };
 
 export default api;

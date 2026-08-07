@@ -6,7 +6,6 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import session from 'express-session';
 import path from 'path';
-import fs from 'fs';
 
 import config from './config';
 import {
@@ -19,6 +18,7 @@ import {
 } from './middleware/security';
 import { requestLogger, errorLogger } from './middleware/logging';
 import database, { initializeDatabase } from './database';
+import { PostgresSessionStore } from './database/sessionStore';
 import authRoutes from './routes/auth';
 import googleRoutes from './routes/google';
 import smartsheetRoutes from './routes/smartsheet';
@@ -37,6 +37,7 @@ class Server {
   constructor() {
     this.app = express();
     this.sessionMiddleware = session({
+      store: new PostgresSessionStore({ ttlMs: config.session.maxAge }),
       secret: config.session.secret,
       resave: false,
       saveUninitialized: false,
@@ -139,11 +140,6 @@ class Server {
     this.app.use(express.json({ limit: '10mb' }));
     this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
     this.app.use(cookieParser());
-
-    const dataDir = path.dirname(config.database.path);
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
 
     this.app.use(this.sessionMiddleware);
 

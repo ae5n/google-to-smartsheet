@@ -1,156 +1,81 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { io, Socket } from 'socket.io-client';
-import { TransferJob } from '../types';
+import React, { useMemo, useState } from 'react';
+import { useJobStream, StreamStatus } from '../hooks/useJobStream';
+import TransferLedger from './TransferLedger';
+import { TransferLog, TransferStatus } from '../types';
 
 interface TransferProgressProps {
   jobId: string;
 }
 
+const TERMINAL: TransferStatus[] = ['completed', 'completed_with_errors', 'failed', 'cancelled'];
+
+const STATUS_META: Record<TransferStatus, { emoji: string; label: string; classes: string }> = {
+  pending: { emoji: '⏳', label: 'Pending', classes: 'text-yellow-700 bg-yellow-50 border-yellow-200' },
+  running: { emoji: '🔄', label: 'Running', classes: 'text-blue-700 bg-blue-50 border-blue-200' },
+  completed: { emoji: '✅', label: 'Completed', classes: 'text-green-700 bg-green-50 border-green-200' },
+  completed_with_errors: {
+    emoji: '⚠️',
+    label: 'Completed with errors',
+    classes: 'text-orange-700 bg-orange-50 border-orange-200'
+  },
+  failed: { emoji: '❌', label: 'Failed', classes: 'text-red-700 bg-red-50 border-red-200' },
+  cancelled: { emoji: '⏹️', label: 'Cancelled', classes: 'text-gray-700 bg-gray-50 border-gray-200' }
+};
+
+const CONNECTION_META: Record<StreamStatus, { emoji: string; text: string; classes: string } | null> = {
+  live: null, // the happy path needs no banner
+  connecting: {
+    emoji: '🔄',
+    text: 'Connecting to live updates...',
+    classes: 'bg-blue-50 border-blue-200 text-blue-800'
+  },
+  reconnecting: {
+    emoji: '🔌',
+    text: 'Live connection dropped — reconnecting, and refreshing periodically in the meantime',
+    classes: 'bg-yellow-50 border-yellow-200 text-yellow-800'
+  },
+  polling: {
+    emoji: '⚠️',
+    text: 'Live updates unavailable — refreshing periodically instead',
+    classes: 'bg-yellow-50 border-yellow-200 text-yellow-800'
+  },
+  offline: {
+    emoji: '🚫',
+    text: 'Cannot reach the server',
+    classes: 'bg-red-50 border-red-200 text-red-800'
+  }
+};
+
+const LOG_LEVEL_STYLE: Record<string, string> = {
+  info: 'text-gray-700',
+  success: 'text-green-700',
+  warn: 'text-orange-700',
+  error: 'text-red-700'
+};
+
+const formatDuration = (startIso?: string, endIso?: string): string => {
+  if (!startIso || !endIso) return '—';
+  const ms = new Date(endIso).getTime() - new Date(startIso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+};
+
 function TransferProgress({ jobId }: TransferProgressProps) {
-  const [job, setJob] = useState<TransferJob | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [showActivityLog, setShowActivityLog] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'fallback'>('connecting');
-  
-  const socketRef = useRef<Socket | null>(null);
-  const fallbackIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const { job, logs, status: streamStatus, loading, error } = useJobStream(jobId);
+  const [showLog, setShowLog] = useState(false);
+  const [logFilter, setLogFilter] = useState<string>('');
 
-  useEffect(() => {
-    let isActive = true;
+  const isTerminal = job ? TERMINAL.includes(job.status) : false;
 
-    // Initial data fetch
-    const fetchInitialData = async () => {
-      try {
-        const response = await fetch(`/api/transfer/jobs/${jobId}`);
-        
-        if (!response.ok) {
-          throw new Error(`Failed to fetch transfer progress: ${response.status}`);
-        }
-        
-        const responseData = await response.json();
-        const jobData = responseData.success ? responseData.data : responseData;
-        
-        if (isActive) {
-          setJob(jobData);
-          setLoading(false);
-        }
-      } catch (err: any) {
-        if (isActive) {
-          setError(err.message);
-          setLoading(false);
-        }
-      }
-    };
-
-    // WebSocket connection
-    const connectWebSocket = () => {
-      const serverUrl = process.env.NODE_ENV === 'development' 
-        ? 'http://localhost:3001' 
-        : window.location.origin;
-        
-      socketRef.current = io(serverUrl, {
-        transports: ['websocket', 'polling']
-      });
-
-      const socket = socketRef.current;
-
-      socket.on('connect', () => {
-        setConnectionStatus('connected');
-        socket.emit('join-job', jobId);
-      });
-
-      socket.on('disconnect', () => {
-        setConnectionStatus('fallback');
-        startFallbackPolling();
-      });
-
-      socket.on('job-update', (data: { jobId: string; job: TransferJob }) => {
-        if (data.jobId === jobId && isActive) {
-          setJob(data.job);
-        }
-      });
-
-      socket.on('job-completed', (data: { jobId: string; job: TransferJob }) => {
-        if (data.jobId === jobId && isActive) {
-          setJob(data.job);
-        }
-      });
-
-      socket.on('job-failed', (data: { jobId: string; job: TransferJob }) => {
-        if (data.jobId === jobId && isActive) {
-          setJob(data.job);
-        }
-      });
-
-      socket.on('connect_error', () => {
-        setConnectionStatus('fallback');
-        startFallbackPolling();
-      });
-    };
-
-    // Fallback polling (only when WebSocket fails)
-    const startFallbackPolling = () => {
-      if (fallbackIntervalRef.current) return; // Already polling
-      
-      const poll = async () => {
-        if (!isActive) return;
-        
-        try {
-          const response = await fetch(`/api/transfer/jobs/${jobId}`);
-          if (!response.ok) return;
-          
-          const responseData = await response.json();
-          const jobData = responseData.success ? responseData.data : responseData;
-          
-          if (isActive) {
-            setJob(jobData);
-            
-            // Stop polling if job is complete
-            if (jobData && ['completed', 'failed', 'cancelled'].includes(jobData.status)) {
-              if (fallbackIntervalRef.current) {
-                clearInterval(fallbackIntervalRef.current);
-                fallbackIntervalRef.current = null;
-              }
-            }
-          }
-        } catch (err) {
-          // Fallback polling error - silent fail
-        }
-      };
-      
-      // Poll every 30 seconds as fallback (much less aggressive)
-      fallbackIntervalRef.current = setInterval(poll, 30000);
-    };
-
-    // Initialize
-    fetchInitialData();
-    
-    // Delay WebSocket connection slightly to avoid React strict mode double-mounting issues
-    const connectTimer = setTimeout(() => {
-      if (isActive) {
-        connectWebSocket();
-      }
-    }, 100);
-
-    return () => {
-      isActive = false;
-      clearTimeout(connectTimer);
-      
-      // Cleanup WebSocket
-      if (socketRef.current) {
-        socketRef.current.emit('leave-job', jobId);
-        socketRef.current.disconnect();
-        socketRef.current = null;
-      }
-      
-      // Cleanup fallback polling
-      if (fallbackIntervalRef.current) {
-        clearInterval(fallbackIntervalRef.current);
-        fallbackIntervalRef.current = null;
-      }
-    };
-  }, [jobId]);
+  const filteredLogs = useMemo(
+    () => (logFilter ? logs.filter((l: TransferLog) => l.level === logFilter) : logs),
+    [logs, logFilter]
+  );
 
   if (loading) {
     return (
@@ -161,7 +86,7 @@ function TransferProgress({ jobId }: TransferProgressProps) {
     );
   }
 
-  if (error) {
+  if (error && !job) {
     return (
       <div className="bg-red-50 border border-red-200 rounded-lg p-6">
         <div className="flex items-center">
@@ -189,66 +114,68 @@ function TransferProgress({ jobId }: TransferProgressProps) {
     );
   }
 
-  const getStatusEmoji = (status: string) => {
-    const statusMap: { [key: string]: string } = {
-      pending: '⏳',
-      running: '🔄',
-      completed: '✅',
-      failed: '❌',
-      cancelled: '⏹️'
-    };
-    return statusMap[status] || '❓';
+  const progress = job.progress || {
+    totalRows: 0,
+    processedRows: 0,
+    totalImages: 0,
+    processedImages: 0,
+    errors: [],
+    warnings: []
   };
 
-  const getStatusColor = (status: string) => {
-    const colorMap: { [key: string]: string } = {
-      pending: 'text-yellow-600 bg-yellow-50 border-yellow-200',
-      running: 'text-blue-600 bg-blue-50 border-blue-200',
-      completed: 'text-green-600 bg-green-50 border-green-200',
-      failed: 'text-red-600 bg-red-50 border-red-200',
-      cancelled: 'text-gray-600 bg-gray-50 border-gray-200'
-    };
-    return colorMap[status] || 'text-gray-600 bg-gray-50 border-gray-200';
-  };
+  // "Transferred" means Smartsheet confirmed the row. Attempted-but-unconfirmed
+  // rows are shown separately rather than folded into the success figure.
+  const insertedRows = progress.insertedRows ?? 0;
+  const failedRows = progress.failedRows ?? 0;
+  const totalRows = progress.totalRows || 0;
 
-  const progressPercentage = job.progress && job.progress.totalRows > 0 
-    ? Math.round((job.progress.processedRows / job.progress.totalRows) * 100)
-    : 0;
+  const rowPercent = totalRows > 0 ? Math.round((insertedRows / totalRows) * 100) : 0;
+  const failedPercent = totalRows > 0 ? Math.round((failedRows / totalRows) * 100) : 0;
 
-  const imageProgressPercentage = job.progress && job.progress.totalImages > 0 
-    ? Math.round((job.progress.processedImages / job.progress.totalImages) * 100)
-    : 0;
+  const embedded = progress.successfulImages ?? 0;
+  const asLinks = progress.fallbackImages ?? 0;
+  const imagesFailed = progress.failedImages ?? 0;
+  const totalImages = progress.totalImages || 0;
+
+  const meta = STATUS_META[job.status] || STATUS_META.pending;
+  const connection = CONNECTION_META[streamStatus];
 
   return (
     <div className="space-y-6">
-      {/* Connection Status */}
-      {connectionStatus !== 'connected' && (
-        <div className={`border rounded-lg p-3 ${
-          connectionStatus === 'fallback' 
-            ? 'bg-yellow-50 border-yellow-200 text-yellow-800' 
-            : 'bg-blue-50 border-blue-200 text-blue-800'
-        }`}>
+      {error && (
+        <div className="border rounded-lg p-3 bg-red-50 border-red-200 text-red-800">
           <div className="flex items-center text-sm">
-            <span className="mr-2">
-              {connectionStatus === 'connecting' && '🔄'}
-              {connectionStatus === 'fallback' && '⚠️'}
-              {connectionStatus === 'disconnected' && '🔌'}
-            </span>
-            {connectionStatus === 'connecting' && 'Connecting to real-time updates...'}
-            {connectionStatus === 'fallback' && 'Using backup polling (WebSocket unavailable)'}
-            {connectionStatus === 'disconnected' && 'Reconnecting...'}
+            <span className="mr-2" aria-hidden="true">&#9888;</span>
+            {error}
           </div>
         </div>
       )}
-      
+
+      {connection && !isTerminal && (
+        <div className={`border rounded-lg p-3 ${connection.classes}`}>
+          <div className="flex items-center text-sm">
+            <span className="mr-2">{connection.emoji}</span>
+            {connection.text}
+          </div>
+        </div>
+      )}
+
       {/* Header */}
-      <div className={`border rounded-lg p-6 ${getStatusColor(job.status)}`}>
-        <div className="flex items-center justify-between">
+      <div className={`border rounded-lg p-6 ${meta.classes}`}>
+        <div className="flex items-center justify-between flex-wrap gap-4">
           <div className="flex items-center">
-            <span className="text-3xl mr-4">{getStatusEmoji(job.status)}</span>
+            <span className="text-3xl mr-4">{meta.emoji}</span>
             <div>
-              <h2 className="text-2xl font-bold capitalize">{job.status}</h2>
-              <p className="opacity-75">Transfer Job: {job.id}</p>
+              <h2 className="text-2xl font-bold">{meta.label}</h2>
+              <p className="opacity-75 text-sm">Transfer Job: {job.id}</p>
+              {job.status === 'running' && progress.currentTab && (
+                <p className="opacity-75 text-sm mt-1">
+                  Working on “{progress.currentTab}”
+                  {progress.currentBatch && progress.totalBatches
+                    ? ` — batch ${progress.currentBatch} of ${progress.totalBatches}`
+                    : ''}
+                </p>
+              )}
             </div>
           </div>
           <div className="text-right">
@@ -258,11 +185,41 @@ function TransferProgress({ jobId }: TransferProgressProps) {
             </p>
             {job.completedAt && (
               <>
-                <p className="text-sm opacity-75 mt-2">Completed</p>
+                <p className="text-sm opacity-75 mt-2">Finished</p>
                 <p className="font-semibold">{new Date(job.completedAt).toLocaleString()}</p>
               </>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* Headline figures — each one an outcome, not an intention */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white border rounded-lg p-4">
+          <p className="text-sm text-gray-600">Rows transferred</p>
+          <p className="text-2xl font-bold text-green-700">
+            {insertedRows}
+            <span className="text-base font-normal text-gray-500"> / {totalRows}</span>
+          </p>
+        </div>
+        <div className="bg-white border rounded-lg p-4">
+          <p className="text-sm text-gray-600">Rows not transferred</p>
+          <p className={`text-2xl font-bold ${failedRows > 0 ? 'text-red-700' : 'text-gray-400'}`}>
+            {failedRows}
+          </p>
+        </div>
+        <div className="bg-white border rounded-lg p-4">
+          <p className="text-sm text-gray-600">Images embedded</p>
+          <p className="text-2xl font-bold text-green-700">
+            {embedded}
+            <span className="text-base font-normal text-gray-500"> / {totalImages}</span>
+          </p>
+        </div>
+        <div className="bg-white border rounded-lg p-4">
+          <p className="text-sm text-gray-600">Duration</p>
+          <p className="text-2xl font-bold text-gray-800">
+            {formatDuration(job.createdAt, job.completedAt || (isTerminal ? undefined : new Date().toISOString()))}
+          </p>
         </div>
       </div>
 
@@ -310,24 +267,16 @@ function TransferProgress({ jobId }: TransferProgressProps) {
                   <p className="font-medium">{job.targetInfo.workspaceName}</p>
                 </div>
               )}
-              {job.targetInfo.folderName && (
-                <div>
-                  <p className="text-sm text-gray-600">Folder</p>
-                  <p className="font-medium">{job.targetInfo.folderName}</p>
-                </div>
-              )}
               {job.targetInfo.sheetUrl && (
-                <div>
-                  <a 
-                    href={job.targetInfo.sheetUrl} 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center text-blue-600 hover:text-blue-800"
-                  >
-                    <span className="mr-1">🔗</span>
-                    Open Sheet
-                  </a>
-                </div>
+                <a
+                  href={job.targetInfo.sheetUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center text-blue-600 hover:text-blue-800"
+                >
+                  <span className="mr-1">🔗</span>
+                  Open Sheet
+                </a>
               )}
             </div>
           ) : (
@@ -336,377 +285,210 @@ function TransferProgress({ jobId }: TransferProgressProps) {
         </div>
       </div>
 
-      {/* Column Mapping - Concise */}
-      {job.columnMappings && job.columnMappings.length > 0 && (
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-          <div className="flex items-center text-blue-800">
-            <span className="mr-2">🗂️</span>
-            <span className="font-medium">
-              📋 Headers detected: {job.columnMappings.length} columns ({job.columnMappings.slice(0, 5).map(m => m.googleColumn).join(', ')}{job.columnMappings.length > 5 ? '...' : ''})
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Progress Bars */}
+      {/* Progress bars */}
       <div className="bg-white border rounded-lg p-6">
         <h3 className="text-lg font-semibold mb-6 flex items-center">
           <span className="mr-2">📈</span>
           Progress
         </h3>
-        
+
         <div className="space-y-6">
-          {/* Rows Progress */}
           <div>
             <div className="flex justify-between items-center mb-2">
-              <span className="text-sm font-medium text-gray-700">Data Rows</span>
+              <span className="text-sm font-medium text-gray-700">Data rows</span>
               <span className="text-sm text-gray-600">
-                {job.progress?.processedRows || 0} / {job.progress?.totalRows || 0} ({progressPercentage}%)
+                {insertedRows} transferred
+                {failedRows > 0 && <span className="text-red-600"> · {failedRows} failed</span>}
+                {' '}of {totalRows} ({rowPercent}%)
               </span>
             </div>
-            <div className="w-full bg-gray-200 rounded-full h-3">
-              <div 
-                className="bg-blue-600 h-3 rounded-full transition-all duration-300"
-                style={{ width: `${progressPercentage}%` }}
-              ></div>
+            <div className="w-full bg-gray-200 rounded-full h-3 relative overflow-hidden">
+              <div
+                className="bg-green-600 h-3 absolute left-0 transition-all duration-300"
+                style={{ width: `${rowPercent}%` }}
+              />
+              <div
+                className="bg-red-500 h-3 absolute transition-all duration-300"
+                style={{ left: `${rowPercent}%`, width: `${failedPercent}%` }}
+              />
             </div>
           </div>
 
-          {/* Images Progress */}
-          {job.progress && job.progress.totalImages > 0 && (
+          {totalImages > 0 && (
             <div>
               <div className="flex justify-between items-center mb-2">
                 <span className="text-sm font-medium text-gray-700">Images</span>
                 <span className="text-sm text-gray-600">
-                  {job.progress.processedImages || 0} / {job.progress.totalImages || 0} ({imageProgressPercentage}%)
+                  {progress.processedImages} of {totalImages} resolved
                 </span>
               </div>
               <div className="w-full bg-gray-200 rounded-full h-3 relative overflow-hidden">
-                {/* Successful images - green */}
-                <div 
+                <div
                   className="bg-green-600 h-3 absolute left-0 transition-all duration-300"
-                  style={{ 
-                    width: `${job.progress.totalImages > 0 ? (job.progress.successfulImages || 0) / job.progress.totalImages * 100 : 0}%` 
-                  }}
-                ></div>
-                {/* Fallback images - orange */}
-                <div 
+                  style={{ width: `${(embedded / totalImages) * 100}%` }}
+                />
+                <div
                   className="bg-orange-500 h-3 absolute transition-all duration-300"
-                  style={{ 
-                    left: `${job.progress.totalImages > 0 ? (job.progress.successfulImages || 0) / job.progress.totalImages * 100 : 0}%`,
-                    width: `${job.progress.totalImages > 0 ? (job.progress.fallbackImages || 0) / job.progress.totalImages * 100 : 0}%` 
+                  style={{
+                    left: `${(embedded / totalImages) * 100}%`,
+                    width: `${(asLinks / totalImages) * 100}%`
                   }}
-                ></div>
+                />
+                <div
+                  className="bg-red-500 h-3 absolute transition-all duration-300"
+                  style={{
+                    left: `${((embedded + asLinks) / totalImages) * 100}%`,
+                    width: `${(imagesFailed / totalImages) * 100}%`
+                  }}
+                />
               </div>
-              {/* Image processing breakdown */}
-              {job.status === 'completed' && (job.progress.successfulImages || job.progress.fallbackImages || job.progress.failedImages) && (
-                <div className="flex gap-4 mt-1 text-xs">
-                  {(job.progress.successfulImages || 0) > 0 && (
-                    <span className="text-green-600">✅ {job.progress.successfulImages} as images</span>
-                  )}
-                  {(job.progress.fallbackImages || 0) > 0 && (
-                    <span className="text-orange-600">🔗 {job.progress.fallbackImages} as links</span>
-                  )}
-                  {(job.progress.failedImages || 0) > 0 && (
-                    <span className="text-red-600">❌ {job.progress.failedImages} failed</span>
-                  )}
-                </div>
-              )}
+              <div className="flex flex-wrap gap-4 mt-2 text-xs">
+                <span className="text-green-700">✅ {embedded} embedded</span>
+                {asLinks > 0 && <span className="text-orange-700">🔗 {asLinks} stored as links</span>}
+                {imagesFailed > 0 && <span className="text-red-700">❌ {imagesFailed} failed</span>}
+              </div>
             </div>
           )}
-
         </div>
       </div>
 
-      {/* Performance Report - Show when completed */}
-      {job.status === 'completed' && (
-        <div className="bg-white border rounded-lg p-6">
-          <h3 className="text-lg font-semibold mb-4 flex items-center">
-            <span className="mr-2">📈</span>
-            Transfer Report
+      {/* The authoritative record */}
+      <TransferLedger jobId={jobId} revision={isTerminal ? 1 : 0} />
+
+      {/* Activity log */}
+      <div className="bg-white border rounded-lg p-6">
+        <div
+          className="flex items-center justify-between cursor-pointer"
+          onClick={() => setShowLog(!showLog)}
+        >
+          <h3 className="text-lg font-semibold flex items-center">
+            <span className="mr-2">📋</span>
+            Activity Log
+            <span className="ml-2 text-sm text-gray-500">({logs.length} entries)</span>
           </h3>
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-            {/* Duration */}
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-blue-800">Duration</span>
-                <span className="text-2xl">⏱️</span>
-              </div>
-              <p className="text-xl font-bold text-blue-900">
-                {job.createdAt && job.completedAt 
-                  ? `${Math.round((new Date(job.completedAt).getTime() - new Date(job.createdAt).getTime()) / 1000 / 60)}m`
-                  : 'N/A'
-                }
-              </p>
-            </div>
-
-            {/* Success Rate */}
-            <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-green-800">Success Rate</span>
-                <span className="text-2xl">✅</span>
-              </div>
-              <p className="text-xl font-bold text-green-900">
-                {job.progress?.totalRows > 0 
-                  ? `${Math.round((job.progress.processedRows / job.progress.totalRows) * 100)}%`
-                  : '100%'
-                }
-              </p>
-              <p className="text-xs text-green-700">
-                {job.progress?.processedRows || 0} / {job.progress?.totalRows || 0} rows
-              </p>
-            </div>
-
-            {/* Images Processed */}
-            {job.progress && job.progress.totalImages > 0 && (
-              <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-medium text-purple-800">Images</span>
-                  <span className="text-2xl">🖼️</span>
-                </div>
-                <p className="text-xl font-bold text-purple-900">
-                  {job.progress.successfulImages || 0}
-                  {((job.progress.fallbackImages || 0) > 0) && (
-                    <span className="text-sm text-orange-600 ml-1">
-                      +{job.progress.fallbackImages} links
-                    </span>
-                  )}
-                </p>
-                <p className="text-xs text-purple-700">
-                  of {job.progress.totalImages || 0} total
-                  {(job.progress.failedImages || 0) > 0 && (
-                    <span className="text-red-600">
-                      , {job.progress.failedImages} failed
-                    </span>
-                  )}
-                </p>
-              </div>
-            )}
-
-            {/* Issues */}
-            <div className={`border rounded-lg p-4 ${
-              (job.progress?.errors?.length || 0) + (job.progress?.warnings?.length || 0) > 0 
-                ? 'bg-red-50 border-red-200' 
-                : 'bg-gray-50 border-gray-200'
-            }`}>
-              <div className="flex items-center justify-between mb-2">
-                <span className={`text-sm font-medium ${
-                  (job.progress?.errors?.length || 0) + (job.progress?.warnings?.length || 0) > 0 
-                    ? 'text-red-800' 
-                    : 'text-gray-800'
-                }`}>Issues</span>
-                <span className="text-2xl">
-                  {(job.progress?.errors?.length || 0) + (job.progress?.warnings?.length || 0) > 0 ? '⚠️' : '✨'}
-                </span>
-              </div>
-              <p className={`text-xl font-bold ${
-                (job.progress?.errors?.length || 0) + (job.progress?.warnings?.length || 0) > 0 
-                  ? 'text-red-900' 
-                  : 'text-gray-900'
-              }`}>
-                {(job.progress?.errors?.length || 0) + (job.progress?.warnings?.length || 0)}
-              </p>
-              <p className={`text-xs ${
-                (job.progress?.errors?.length || 0) + (job.progress?.warnings?.length || 0) > 0 
-                  ? 'text-red-700' 
-                  : 'text-gray-700'
-              }`}>
-                {job.progress?.errors?.length || 0} errors, {job.progress?.warnings?.length || 0} warnings
-              </p>
-            </div>
-          </div>
-
-          {/* Summary */}
-          <div className="bg-gray-50 rounded-lg p-4">
-            <h4 className="font-semibold text-gray-800 mb-2">Summary</h4>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-              <div>
-                <p className="text-gray-600">
-                  <strong>Source:</strong> {job.sourceInfo?.spreadsheetTitle || 'Unknown'}
-                </p>
-                <p className="text-gray-600">
-                  <strong>Sheets:</strong> {job.sourceInfo?.tabNames?.join(', ') || 'Unknown'}
-                </p>
-                <p className="text-gray-600">
-                  <strong>Header Row:</strong> {job.sourceInfo?.headerRowIndex || 'Unknown'}
-                </p>
-              </div>
-              <div>
-                <p className="text-gray-600">
-                  <strong>Target:</strong> {job.targetInfo?.sheetName || 'Unknown'}
-                </p>
-                <p className="text-gray-600">
-                  <strong>Rows Transferred:</strong> {job.progress?.processedRows || 0}
-                </p>
-                <p className="text-gray-600">
-                  <strong>Images:</strong> {job.progress?.successfulImages || 0} uploaded
-                  {(job.progress?.fallbackImages || 0) > 0 && (
-                    <>, {job.progress.fallbackImages} as links</>
-                  )}
-                  {(job.progress?.failedImages || 0) > 0 && (
-                    <>, {job.progress.failedImages} failed</>
-                  )}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* Quick Actions */}
-          {job.targetInfo?.sheetUrl && (
-            <div className="flex justify-center mt-6">
-              <a 
-                href={job.targetInfo.sheetUrl} 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-              >
-                <span className="mr-2">🔗</span>
-                Open Target Sheet
-              </a>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Failed Transfer Report */}
-      {job.status === 'failed' && (
-        <div className="bg-red-50 border border-red-200 rounded-lg p-6">
-          <h3 className="text-lg font-semibold mb-4 flex items-center text-red-800">
-            <span className="mr-2">❌</span>
-            Transfer Failed
-          </h3>
-          
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-            <div className="bg-white border border-red-200 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-red-800">Rows Processed</span>
-                <span className="text-2xl">📊</span>
-              </div>
-              <p className="text-xl font-bold text-red-900">
-                {job.progress?.processedRows || 0} / {job.progress?.totalRows || 0}
-              </p>
-            </div>
-
-            <div className="bg-white border border-red-200 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-red-800">Images Processed</span>
-                <span className="text-2xl">🖼️</span>
-              </div>
-              <p className="text-xl font-bold text-red-900">
-                {job.progress?.processedImages || 0} / {job.progress?.totalImages || 0}
-              </p>
-            </div>
-
-            <div className="bg-white border border-red-200 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-red-800">Errors</span>
-                <span className="text-2xl">⚠️</span>
-              </div>
-              <p className="text-xl font-bold text-red-900">
-                {job.progress?.errors?.length || 0}
-              </p>
-            </div>
-          </div>
-
-          <div className="bg-white rounded-lg p-4">
-            <p className="text-red-800">
-              <strong>Partial Progress:</strong> The transfer was interrupted, but some data may have been successfully transferred to the target sheet.
-            </p>
-            {job.targetInfo?.sheetUrl && (
-              <div className="mt-3">
-                <a 
-                  href={job.targetInfo.sheetUrl} 
-                  target="_blank" 
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center text-red-600 hover:text-red-800"
-                >
-                  <span className="mr-2">🔗</span>
-                  Check Partial Results in Target Sheet
-                </a>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Activity Log - Collapsible */}
-      {job.logs && job.logs.length > 0 && (
-        <div className="bg-white border rounded-lg p-6">
-          <div 
-            className="flex items-center justify-between cursor-pointer"
-            onClick={() => setShowActivityLog(!showActivityLog)}
+          <span
+            className={`transform transition-transform duration-200 text-xl ${
+              showLog ? 'rotate-180' : ''
+            }`}
           >
-            <h3 className="text-lg font-semibold flex items-center">
-              <span className="mr-2">📋</span>
-              Activity Log
-              <span className="ml-2 text-sm text-gray-500">({job.logs.length} entries)</span>
-            </h3>
-            <span className={`transform transition-transform duration-200 text-xl ${showActivityLog ? 'rotate-180' : ''}`}>
-              ⌄
-            </span>
-          </div>
-          
-          {showActivityLog && (
-            <div className="mt-4 space-y-3 max-h-96 overflow-y-auto">
-              {job.logs.slice().reverse().map((log, index) => (
-                <div key={index} className="flex items-start space-x-3 p-3 bg-gray-50 rounded-lg">
-                  <span className="text-xl">{log.emoji}</span>
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between">
-                      <p className="font-medium">{log.message}</p>
-                      <span className="text-xs text-gray-500">
-                        {log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : 'Unknown'}
-                      </span>
-                    </div>
-                    {log.details && (
-                      <pre className="text-xs text-gray-600 mt-1 bg-gray-100 p-2 rounded overflow-x-auto">
-                        {JSON.stringify(log.details, null, 2)}
-                      </pre>
-                    )}
-                  </div>
-                </div>
+            ⌄
+          </span>
+        </div>
+
+        {showLog && (
+          <>
+            <div className="flex flex-wrap gap-2 mt-4">
+              {['', 'success', 'info', 'warn', 'error'].map(level => (
+                <button
+                  key={level || 'all'}
+                  onClick={() => setLogFilter(level)}
+                  className={`px-3 py-1 rounded-full text-sm border capitalize ${
+                    logFilter === level
+                      ? 'border-blue-500 bg-blue-50 text-blue-800'
+                      : 'border-gray-200 text-gray-700'
+                  }`}
+                >
+                  {level || 'all'} ({level ? logs.filter(l => l.level === level).length : logs.length})
+                </button>
               ))}
             </div>
-          )}
-        </div>
-      )}
 
-      {/* Errors and Warnings */}
-      {(job.progress?.errors?.length > 0 || job.progress?.warnings?.length > 0) && (
+            <div className="mt-4 space-y-2 max-h-96 overflow-y-auto">
+              {filteredLogs
+                .slice()
+                .reverse()
+                .map((log, index) => (
+                  <div
+                    key={log.seq ?? index}
+                    className="flex items-start space-x-3 p-3 bg-gray-50 rounded-lg"
+                  >
+                    <span className="text-lg">{log.emoji}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-baseline justify-between gap-3">
+                        <p className={`font-medium ${LOG_LEVEL_STYLE[log.level] || ''}`}>
+                          {log.message}
+                        </p>
+                        <span className="text-xs text-gray-500 whitespace-nowrap">
+                          {log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : ''}
+                        </span>
+                      </div>
+                      {log.details && (
+                        <p className="text-xs text-gray-600 mt-1">
+                          {Object.entries(log.details)
+                            .map(([key, value]) => `${key}: ${value}`)
+                            .join(' · ')}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              {filteredLogs.length === 0 && (
+                <p className="text-sm text-gray-500 py-3">No entries at this level.</p>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Errors and warnings */}
+      {(progress.errors?.length > 0 || progress.warnings?.length > 0) && (
         <div className="bg-white border rounded-lg p-6">
           <h3 className="text-lg font-semibold mb-4 flex items-center">
             <span className="mr-2">⚠️</span>
             Issues
           </h3>
-          
-          {job.progress?.errors && job.progress.errors.length > 0 && (
+
+          {progress.errors?.length > 0 && (
             <div className="mb-4">
-              <h4 className="font-medium text-red-800 mb-2">Errors ({job.progress.errors.length})</h4>
-              <div className="space-y-2">
-                {job.progress.errors.map((error, index) => (
+              <h4 className="font-medium text-red-800 mb-2">Errors ({progress.errors.length})</h4>
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {progress.errors.slice(0, 100).map((err, index) => (
                   <div key={index} className="bg-red-50 border border-red-200 rounded p-3">
-                    <p className="text-red-800 font-medium">{error.message}</p>
-                    {error.row && <p className="text-red-600 text-sm">Row: {error.row}</p>}
+                    <p className="text-red-800 font-medium text-sm">{err.message}</p>
+                    <p className="text-red-600 text-xs mt-1">
+                      {err.tab && <>Tab: {err.tab} · </>}
+                      {err.row !== undefined && <>Source row {err.row} · </>}
+                      {err.type}
+                    </p>
                   </div>
                 ))}
+                {progress.errors.length > 100 && (
+                  <p className="text-xs text-gray-500">
+                    Showing the first 100. Export the transfer record for all of them.
+                  </p>
+                )}
               </div>
             </div>
           )}
 
-          {job.progress?.warnings && job.progress.warnings.length > 0 && (
+          {progress.warnings?.length > 0 && (
             <div>
-              <h4 className="font-medium text-yellow-800 mb-2">Warnings ({job.progress.warnings.length})</h4>
+              <h4 className="font-medium text-yellow-800 mb-2">
+                Warnings ({progress.warnings.length})
+              </h4>
               <div className="space-y-2">
-                {job.progress.warnings.map((warning, index) => (
+                {progress.warnings.map((warning, index) => (
                   <div key={index} className="bg-yellow-50 border border-yellow-200 rounded p-3">
-                    <p className="text-yellow-800 font-medium">{warning.message}</p>
-                    {warning.count && <p className="text-yellow-600 text-sm">Count: {warning.count}</p>}
+                    <p className="text-yellow-800 font-medium text-sm">{warning.message}</p>
                   </div>
                 ))}
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {job.targetInfo?.sheetUrl && isTerminal && (
+        <div className="flex justify-center">
+          <a
+            href={job.targetInfo.sheetUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            <span className="mr-2">🔗</span>
+            Open Target Sheet
+          </a>
         </div>
       )}
     </div>
