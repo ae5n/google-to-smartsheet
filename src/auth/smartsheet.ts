@@ -1,8 +1,9 @@
 import axios from 'axios';
 import config from '../config';
 import { encryptionService } from '../utils/encryption';
-import { generateCodeVerifier, generateCodeChallenge, generateState, createAuthorizationUrl } from '../utils/pkce';
+import { generateCodeVerifier, generateCodeChallenge, generateState } from '../utils/pkce';
 import database from '../database';
+import { smartsheetBucket, throttled } from '../utils/rateLimiter';
 import { EncryptedTokens } from '../types';
 
 export class SmartsheetAuthService {
@@ -192,32 +193,44 @@ export class SmartsheetAuthService {
     encryptedTokens: EncryptedTokens,
     method: 'GET' | 'POST' | 'PUT' | 'DELETE',
     endpoint: string,
-    data?: any
+    data?: any,
+    options: { idempotent?: boolean } = {}
   ): Promise<any> {
     const tokens = encryptionService.decryptTokens(encryptedTokens.encryptedData);
-    
-    const config: any = {
+    // POST creates resources; replaying a timed-out one would duplicate rows.
+    const idempotent = options.idempotent ?? method !== 'POST';
+
+    const requestConfig: any = {
       method,
       url: endpoint.startsWith('http') ? endpoint : `${this.apiUrl}${endpoint}`,
       headers: {
         Authorization: `Bearer ${tokens.accessToken}`,
         'Content-Type': 'application/json'
-      }
+      },
+      timeout: 60000
     };
 
     if (data) {
-      config.data = data;
+      requestConfig.data = data;
     }
 
-    try {
-      const response = await axios(config);
-      return response.data;
-    } catch (error: any) {
-      if (error.response?.status === 401) {
-        throw new Error('Token expired or invalid');
-      }
-      throw error;
-    }
+    // Paced against Smartsheet's 300/min token quota, with backoff on 429/5xx.
+    return throttled(
+      smartsheetBucket,
+      async () => {
+        try {
+          const response = await axios(requestConfig);
+          return response.data;
+        } catch (error: any) {
+          if (error.response?.status === 401) {
+            // Not retryable — the caller must refresh or re-authenticate.
+            throw new Error('Token expired or invalid');
+          }
+          throw error;
+        }
+      },
+      { label: `smartsheet ${method} ${endpoint}`, idempotent }
+    );
   }
 
   public async revokeTokens(encryptedTokens: EncryptedTokens): Promise<void> {

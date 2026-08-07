@@ -1,6 +1,6 @@
 import { google, sheets_v4 } from 'googleapis';
 import { googleAuthService } from '../auth/google';
-import { encryptionService } from '../utils/encryption';
+import { googleBucket, throttled } from '../utils/rateLimiter';
 import { GoogleSheet, GoogleSheetTab, GoogleCellValue, EncryptedTokens } from '../types';
 
 export class GoogleSheetsService {
@@ -9,39 +9,40 @@ export class GoogleSheetsService {
     return google.sheets({ version: 'v4', auth: oauth2Client });
   }
 
+  /** Every Google API call goes through here: paced + retried on 429/5xx. */
+  private async call<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    return throttled(googleBucket, fn, { label: `google ${label}` });
+  }
+
   public async getUserSpreadsheets(encryptedTokens: EncryptedTokens): Promise<GoogleSheet[]> {
     try {
-      const tokens = encryptionService.decryptTokens(encryptedTokens.encryptedData);
-      const driveClient = google.drive({ 
+      const driveClient = google.drive({
         version: 'v3', 
         auth: googleAuthService.createOAuth2Client(encryptedTokens) 
       });
 
-      const response = await driveClient.files.list({
-        q: "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
-        fields: 'files(id,name,modifiedTime)',
-        orderBy: 'modifiedTime desc',
-        pageSize: 100
-      });
+      const response = await this.call('drive.files.list', () =>
+        driveClient.files.list({
+          q: "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
+          fields: 'files(id,name,modifiedTime)',
+          orderBy: 'modifiedTime desc',
+          pageSize: 100
+        })
+      );
 
-      const spreadsheets: GoogleSheet[] = [];
-
-      for (const file of response.data.files || []) {
-        if (file.id && file.name) {
-          try {
-            const sheets = await this.getSpreadsheetTabs(encryptedTokens, file.id);
-            spreadsheets.push({
-              spreadsheetId: file.id,
-              title: file.name,
-              sheets
-            });
-          } catch (error) {
-            console.warn(`Failed to get tabs for spreadsheet ${file.id}:`, error);
-          }
-        }
-      }
-
-      return spreadsheets;
+      // Tabs are deliberately NOT fetched here. Doing so cost one extra
+      // spreadsheets.get per file — up to 100 calls against a 60/min quota
+      // just to render the picker. Callers fetch tabs for the one
+      // spreadsheet the user actually selects, via getSpreadsheetTabs().
+      return (response.data.files || [])
+        .filter((file): file is { id: string; name: string } =>
+          Boolean(file.id && file.name)
+        )
+        .map(file => ({
+          spreadsheetId: file.id,
+          title: file.name,
+          sheets: []
+        }));
     } catch (error: any) {
       if (error.code === 401) {
         throw new Error('Google authentication expired');
@@ -93,8 +94,6 @@ export class GoogleSheetsService {
             ? `'${tabName}'!A${headerRowIndex + 1}:ZZ` // Get from header row to end, all columns and rows
             : `'${tabName}'`;
           
-          
-          const valueRenderOption = includeFormulas ? 'FORMULA' : 'FORMATTED_VALUE';
           
           const [valuesResponse, formulasResponse, sheetDataResponse] = await Promise.all([
             sheetsClient.spreadsheets.values.get({

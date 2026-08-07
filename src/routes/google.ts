@@ -206,7 +206,7 @@ router.post('/spreadsheets/:spreadsheetId/preview', async (req: Request, res: Re
     let totalImages = 0;
     const images: Array<{ url: string; driveFileId?: string }> = [];
 
-    for (const [tabName, tabData] of Object.entries(data)) {
+    for (const tabData of Object.values(data)) {
       totalRows += Math.max(0, tabData.length - 1); // Exclude header row
       
       for (const row of tabData) {
