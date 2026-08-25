@@ -1,5 +1,6 @@
 import { Pool, types } from 'pg';
 import config from '../config';
+import { startDatabaseMaintenance } from './maintenance';
 import {
   User,
   TransferJob,
@@ -760,35 +761,10 @@ export const database = new PostgresDatabaseManager();
 
 export async function initializeDatabase(): Promise<void> {
   await database.initialize();
-
-  const reconcileInterrupted = async () => {
-    const ids = await database.failStaleRunningJobs(config.database.staleTransferMinutes);
-    if (ids.length > 0) {
-      console.warn(JSON.stringify({ event: 'stale_transfers_failed', jobIds: ids }));
-    }
-  };
-
-  // Existing jobs get a fresh heartbeat when the column is first added. The
-  // recurring check handles them after the grace period without racing a
-  // previous instance during a rolling deploy.
-  await reconcileInterrupted();
-
-  const reconciliation = setInterval(() => {
-    reconcileInterrupted().catch(console.error);
-  }, 60 * 1000);
-  reconciliation.unref?.();
-
-  const cleanup = setInterval(() => {
-    database.cleanupExpiredOAuthStates().catch(console.error);
-    database.sessionCleanup().catch(console.error);
-    database
-      .cleanupTransferHistory(config.database.transferHistoryRetentionDays)
-      .then(count => {
-        if (count > 0) console.log(JSON.stringify({ event: 'transfer_history_pruned', count }));
-      })
-      .catch(console.error);
-  }, 30 * 60 * 1000);
-  cleanup.unref?.();
+  await startDatabaseMaintenance(database, {
+    staleTransferMinutes: config.database.staleTransferMinutes,
+    transferHistoryRetentionDays: config.database.transferHistoryRetentionDays
+  });
 }
 
 export default database;
