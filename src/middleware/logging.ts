@@ -14,6 +14,18 @@ interface LogEntry {
   error?: string;
 }
 
+/**
+ * Query strings can contain OAuth codes, state tokens, API keys, and user data.
+ * Keep the request path for diagnostics without persisting any query values.
+ */
+export const sanitizeLogUrl = (url: string): string => {
+  const queryIndex = url.indexOf('?');
+  return queryIndex === -1 ? url : url.slice(0, queryIndex);
+};
+
+const requestLogUrl = (req: Request): string =>
+  sanitizeLogUrl(req.originalUrl || req.url || '/');
+
 class Logger {
   private logDir: string;
   private readonly writeFiles: boolean;
@@ -53,7 +65,7 @@ class Logger {
     const entry: LogEntry = {
       timestamp: new Date().toISOString(),
       method: req.method,
-      url: req.url,
+      url: requestLogUrl(req),
       ip: req.ip || req.connection.remoteAddress || 'unknown',
       userAgent: req.get('User-Agent') || 'unknown',
       userId: req.session?.user?.id,
@@ -68,7 +80,7 @@ class Logger {
     const entry: LogEntry = {
       timestamp: new Date().toISOString(),
       method: req.method,
-      url: req.url,
+      url: requestLogUrl(req),
       ip: req.ip || req.connection.remoteAddress || 'unknown',
       userAgent: req.get('User-Agent') || 'unknown',
       userId: req.session?.user?.id,
@@ -82,7 +94,7 @@ class Logger {
     const entry: LogEntry = {
       timestamp: new Date().toISOString(),
       method: req.method,
-      url: req.url,
+      url: requestLogUrl(req),
       ip: req.ip || req.connection.remoteAddress || 'unknown',
       userAgent: req.get('User-Agent') || 'unknown',
       userId: req.session?.user?.id,

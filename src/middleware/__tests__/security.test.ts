@@ -32,6 +32,7 @@ describe('security middleware', () => {
       status
     } as unknown as Response;
     const req = request('/api/transfer/jobs/123', {
+      originalUrl: '/api/transfer/jobs/123?token=secret-token',
       rateLimit: { resetTime: new Date(Date.now() + 5_000) }
     });
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -47,6 +48,8 @@ describe('security middleware', () => {
     expect(Number(headers['Retry-After'])).toBeLessThanOrEqual(5);
     expect(status).toHaveBeenCalledWith(429);
     expect(json).toHaveBeenCalledWith(expect.objectContaining({ retryAfter: expect.any(Number) }));
+    expect(warn).toHaveBeenCalledWith(expect.not.stringContaining('secret-token'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"path":"/api/transfer/jobs/123"'));
     warn.mockRestore();
   });
 

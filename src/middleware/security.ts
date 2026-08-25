@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import rateLimit, { Options } from 'express-rate-limit';
 import { v4 as uuidv4 } from 'uuid';
 import config from '../config';
+import { sanitizeLogUrl } from './logging';
 
 export const securityMiddleware = helmet({
   contentSecurityPolicy: {
@@ -116,7 +117,7 @@ export const rateLimitHandler = (req: Request, res: Response, _next: NextFunctio
   console.warn(JSON.stringify({
     event: 'rate_limit_rejected',
     method: req.method,
-    path: req.originalUrl || req.url,
+    path: sanitizeLogUrl(req.originalUrl || req.url),
     retryAfterSec,
     authenticated: Boolean(req.session?.user?.id)
   }));
